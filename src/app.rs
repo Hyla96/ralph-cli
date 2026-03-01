@@ -160,6 +160,8 @@ pub struct App {
     pub runner_tabs: Vec<RunnerTab>,
     /// 0 = Workflows tab; 1..=runner_tabs.len() = runner tab at index active_tab-1.
     pub active_tab: usize,
+    /// When true the next keypress is interpreted as a tab navigation chord.
+    pub tab_nav_pending: bool,
     pub dialog: Option<Dialog>,
     pub status_message: Option<String>,
     pub status_message_expires: Option<Instant>,
@@ -177,6 +179,7 @@ impl App {
             current_workflow: None,
             runner_tabs: Vec::new(),
             active_tab: 0,
+            tab_nav_pending: false,
             dialog: None,
             status_message: None,
             status_message_expires: None,
@@ -211,8 +214,13 @@ impl App {
         {
             if self.dialog.is_some() {
                 self.handle_dialog_key(key.code);
+            } else if self.tab_nav_pending {
+                // Consume the chord: always clear the flag, then act.
+                self.tab_nav_pending = false;
+                self.handle_tab_nav_key(key.code);
             } else {
                 match key.code {
+                    KeyCode::Char('t') => self.tab_nav_pending = true,
                     KeyCode::Char('q') => self.running = false,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.running = false;
@@ -230,6 +238,34 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Handles the second key of a `t`-prefix tab navigation chord.
+    ///
+    /// Digits `1`–`9` jump to the tab at index `digit − 1` (0 = Workflows).
+    /// `Left`/`Right` cycle through all tabs with wrapping.
+    /// Any other key is silently ignored (flag was already cleared by the caller).
+    fn handle_tab_nav_key(&mut self, code: KeyCode) {
+        let total_tabs = 1 + self.runner_tabs.len(); // Workflows tab + runner tabs
+        match code {
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let idx = (c as usize) - ('1' as usize); // digit '1' → 0, '9' → 8
+                if idx < total_tabs {
+                    self.active_tab = idx;
+                }
+            }
+            KeyCode::Left => {
+                self.active_tab = if self.active_tab == 0 {
+                    total_tabs - 1
+                } else {
+                    self.active_tab - 1
+                };
+            }
+            KeyCode::Right => {
+                self.active_tab = (self.active_tab + 1) % total_tabs;
+            }
+            _ => {} // any other key: flag already cleared, no tab change
+        }
     }
 
     fn edit_current_plan(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
