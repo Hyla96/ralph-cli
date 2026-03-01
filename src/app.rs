@@ -57,19 +57,23 @@ pub enum Dialog {
 
 /// Spawns `claude --agent ralph` and streams output lines back via `tx`.
 /// Listens on `kill_rx` for an early termination signal.
+/// Lines received on `stdin_rx` are forwarded (with a trailing `\n`) to the
+/// child's stdin pipe.
 async fn runner_task(
     plan_dir: PathBuf,
     repo_root: PathBuf,
     tx: UnboundedSender<RunnerEvent>,
     kill_rx: oneshot::Receiver<()>,
+    mut stdin_rx: UnboundedReceiver<String>,
 ) {
     use std::process::Stdio;
-    use tokio::io::AsyncBufReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let mut child = match tokio::process::Command::new("claude")
         .args(["--agent", "ralph", "Implement the next task."])
         .current_dir(&repo_root)
         .env("RALPH_PLAN_DIR", &plan_dir)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -85,8 +89,22 @@ async fn runner_task(
         }
     };
 
+    let child_stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+
+    // Detached task: forward lines from stdin_rx to the child's stdin pipe.
+    // Exits silently when the channel closes or a write fails.
+    drop(tokio::spawn(async move {
+        let mut writer = child_stdin;
+        while let Some(line) = stdin_rx.recv().await {
+            let mut data = line;
+            data.push('\n');
+            if writer.write_all(data.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    }));
 
     let tx_stdout = tx.clone();
     let stdout_task = tokio::spawn(async move {
@@ -569,6 +587,7 @@ impl App {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         let tab = RunnerTab {
             workflow_name: name,
@@ -576,14 +595,16 @@ impl App {
             state: RunnerTabState::Running { iteration: 1 },
             runner_rx: Some(rx),
             runner_kill_tx: Some(kill_tx),
-            stdin_tx: None,
+            stdin_tx: Some(stdin_tx),
             input_buffer: String::new(),
             log_scroll: 0,
         };
         self.runner_tabs.push(tab);
         self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
 
-        drop(tokio::spawn(runner_task(plan_dir, repo_root, tx, kill_rx)));
+        drop(tokio::spawn(runner_task(
+            plan_dir, repo_root, tx, kill_rx, stdin_rx,
+        )));
     }
 
     /// Spawns the next claude iteration after the user confirms via the ContinuePrompt dialog.
@@ -611,14 +632,17 @@ impl App {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
-            tab.stdin_tx = None;
+            tab.stdin_tx = Some(stdin_tx);
             tab.state = RunnerTabState::Running { iteration: iteration + 1 };
         }
 
-        drop(tokio::spawn(runner_task(plan_dir, repo_root, tx, kill_rx)));
+        drop(tokio::spawn(runner_task(
+            plan_dir, repo_root, tx, kill_rx, stdin_rx,
+        )));
     }
 }
