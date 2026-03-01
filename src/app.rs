@@ -255,6 +255,9 @@ pub struct App {
     pub watcher_rx: Option<Receiver<WatcherEvent>>,
     /// Keeps the OS watcher alive. Dropping this stops watching.
     pub _watcher: Option<Watcher>,
+    /// Transient notification set after a watcher-triggered reload.
+    /// Tuple is (message_text, time_set). Cleared after 3 seconds.
+    pub notification: Option<(String, Instant)>,
 }
 
 impl App {
@@ -289,6 +292,7 @@ impl App {
             resize_txs: Vec::new(),
             watcher_rx: watcher_rx_opt,
             _watcher: watcher_opt,
+            notification: None,
         };
         app.load_current_workflow();
         app
@@ -300,7 +304,17 @@ impl App {
             self.drain_runner_channels();
             let watcher_events = self.drain_watcher_channel();
             if !watcher_events.is_empty() {
+                let first_path = watcher_events.first().map(|e| e.path.clone());
                 self.reload_all();
+                if let Some(path) = first_path {
+                    let root = self.store.root().to_path_buf();
+                    let rel =
+                        path.strip_prefix(&root).map(|p| p.to_path_buf()).unwrap_or(path);
+                    self.notification = Some((
+                        format!("↻ {} reloaded", rel.display()),
+                        Instant::now(),
+                    ));
+                }
             }
             if let Err(e) = terminal.draw(|frame| crate::ui::draw(frame, self)) {
                 self.display_error(e.to_string());
@@ -669,6 +683,14 @@ impl App {
         {
             self.status_message = None;
             self.status_message_expires = None;
+        }
+        // Clear notification after 3 seconds.
+        if self
+            .notification
+            .as_ref()
+            .is_some_and(|(_, set_at)| set_at.elapsed() >= Duration::from_secs(3))
+        {
+            self.notification = None;
         }
     }
 

@@ -112,11 +112,25 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
     let log_block = Block::default().borders(Borders::ALL).title("Log");
     frame.render_widget(log_block, vertical[1]);
 
-    // Status bar: workflow management hints.
+    // Status bar: workflow management hints + optional right-aligned notification.
+    let notif = app.notification.as_ref().map(|(s, _)| s.as_str());
+    let bar_width = vertical[2].width;
     let status_text = if let Some(msg) = &app.status_message {
-        Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Red)))
+        let left = msg.as_str();
+        let left_len = left.chars().count();
+        let mut spans = vec![Span::styled(left.to_string(), Style::default().fg(Color::Red))];
+        if let Some(n) = notif {
+            spans.extend(notification_right_spans(left_len, n, bar_width));
+        }
+        Line::from(spans)
     } else {
-        Line::from("[r]un  [n]ew  [e]dit  [d]elete  [?]help  [q]uit")
+        let left = "[r]un  [n]ew  [e]dit  [d]elete  [?]help  [q]uit";
+        let left_len = left.chars().count();
+        let mut spans = vec![Span::raw(left)];
+        if let Some(n) = notif {
+            spans.extend(notification_right_spans(left_len, n, bar_width));
+        }
+        Line::from(spans)
     };
     frame.render_widget(Paragraph::new(status_text), vertical[2]);
 }
@@ -154,20 +168,44 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Status line: transient messages take priority; otherwise show runner state.
+    // Optional right-aligned notification is appended when there is room.
+    let notif = app.notification.as_ref().map(|(s, _)| s.as_str());
+    let bar_width = layout[1].width;
     let status_text = if let Some(msg) = &app.status_message {
-        Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Red)))
+        let left = msg.as_str();
+        let left_len = left.chars().count();
+        let mut spans = vec![Span::styled(left.to_string(), Style::default().fg(Color::Red))];
+        if let Some(n) = notif {
+            spans.extend(notification_right_spans(left_len, n, bar_width));
+        }
+        Line::from(spans)
     } else {
         match &tab.state {
             RunnerTabState::Running { iteration } => {
-                Line::from(format!("[s]top  Running \u{2014} iteration {}/10", iteration))
+                let left = format!("[s]top  Running \u{2014} iteration {}/10", iteration);
+                let left_len = left.chars().count();
+                let mut spans = vec![Span::raw(left)];
+                if let Some(n) = notif {
+                    spans.extend(notification_right_spans(left_len, n, bar_width));
+                }
+                Line::from(spans)
             }
-            RunnerTabState::Done => Line::from("[x]close  Done"),
+            RunnerTabState::Done => {
+                let left = "[x]close  Done";
+                let left_len = left.chars().count();
+                let mut spans = vec![Span::raw(left)];
+                if let Some(n) = notif {
+                    spans.extend(notification_right_spans(left_len, n, bar_width));
+                }
+                Line::from(spans)
+            }
             RunnerTabState::Error(msg) => {
                 let prefix = "Error: ";
                 let suffix = "  [x]close  [q]uit";
-                let avail = layout[1].width as usize;
+                let avail = bar_width as usize;
                 let max_msg = avail.saturating_sub(prefix.len() + suffix.len());
                 let truncated: String = msg.chars().take(max_msg).collect();
+                // Error text fills the bar; notification is omitted when there's no room.
                 Line::from(Span::styled(
                     format!("{prefix}{truncated}{suffix}"),
                     Style::default().fg(Color::Red),
@@ -236,6 +274,45 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Builds right-aligned notification spans to append to a status bar line.
+///
+/// Returns padding + styled notification text as `Span<'static>` values, or an empty
+/// `Vec` if there is no room (left content fills the bar).
+fn notification_right_spans(
+    left_visible_width: usize,
+    notif: &str,
+    bar_width: u16,
+) -> Vec<Span<'static>> {
+    let total = bar_width as usize;
+    let available = total.saturating_sub(left_visible_width);
+    // Need at least 2 chars: 1 space separator + 1 content character.
+    if available < 2 {
+        return Vec::new();
+    }
+    let max_display = available - 1; // 1 char reserved for the space separator
+    let notif_chars: Vec<char> = notif.chars().collect();
+    let notif_len = notif_chars.len();
+    let style = Style::default().fg(Color::Cyan);
+    if notif_len <= max_display {
+        // Fits without truncation: pad to right-align.
+        let padding = available - notif_len;
+        vec![
+            Span::raw(" ".repeat(padding)),
+            Span::styled(notif.to_string(), style),
+        ]
+    } else if max_display >= 2 {
+        // Truncate with ellipsis; reserve 1 char for `…`.
+        let text_len = max_display - 1;
+        let truncated: String = notif_chars.iter().take(text_len).collect();
+        vec![
+            Span::raw(" ".to_string()),
+            Span::styled(format!("{}…", truncated), style),
+        ]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Returns a centered `Rect` of the given dimensions inside `area`.
