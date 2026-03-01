@@ -69,6 +69,9 @@ async fn runner_task(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+    eprintln!("[runner] spawning claude in {}", repo_root.display());
+    eprintln!("[runner] RALPH_PLAN_DIR={}", plan_dir.display());
+
     let mut child = match tokio::process::Command::new("claude")
         .args(["--agent", "ralph", "Implement the next task."])
         .current_dir(&repo_root)
@@ -78,12 +81,17 @@ async fn runner_task(
         .stderr(Stdio::piped())
         .spawn()
     {
-        Ok(c) => c,
+        Ok(c) => {
+            eprintln!("[runner] spawned claude pid={:?}", c.id());
+            c
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("[runner] spawn failed: claude not found on PATH");
             let _ = tx.send(RunnerEvent::SpawnError("claude not found on PATH".to_string()));
             return;
         }
         Err(e) => {
+            eprintln!("[runner] spawn failed: {e}");
             let _ = tx.send(RunnerEvent::SpawnError(e.to_string()));
             return;
         }
@@ -135,15 +143,22 @@ async fn runner_task(
     // Wait for child to exit naturally or for a kill signal.
     // When kill_rx fires, child.wait() future is dropped (borrow released)
     // before child.kill() is called below — no simultaneous borrow conflict.
-    let was_killed = tokio::select! {
-        _ = child.wait() => false,
-        _ = kill_rx => true,
+    let (was_killed, exit_status) = tokio::select! {
+        status = child.wait() => {
+            eprintln!("[runner] claude exited naturally: {status:?}");
+            (false, status.ok())
+        }
+        _ = kill_rx => (true, None),
     };
 
     if was_killed {
+        eprintln!("[runner] killing claude");
         let _ = child.kill().await;
         let _ = child.wait().await;
+        eprintln!("[runner] claude killed");
     }
+
+    let _ = exit_status; // logged above
 
     let _ = stdout_task.await;
     let _ = stderr_task.await;
@@ -638,8 +653,10 @@ impl App {
 
             if let Some(msg) = spawn_error {
                 let error_msg = msg.clone();
+                self.runner_tabs[tab_idx].push_log(format!("ERROR: {error_msg}"));
                 self.runner_tabs[tab_idx].state = RunnerTabState::Error(msg);
                 self.status_message = Some(error_msg);
+                self.status_message_expires = None; // persist until dismissed
             } else {
                 // Reload plan from disk — ralph may have updated passes: true.
                 self.load_current_workflow();
