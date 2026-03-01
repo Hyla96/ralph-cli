@@ -270,8 +270,13 @@ async fn runner_task(
         let _ = killer.kill();
     }
 
-    // Wait for the reader to drain all remaining PTY output before sending Exited.
-    let _ = read_handle.await;
+    // Drain remaining PTY output, but with a 500 ms timeout.
+    // Claude may spawn subprocesses (git, test runners, etc.) that inherit the PTY
+    // slave fd.  Those processes keep the slave open after the main claude process
+    // exits, which would cause reader.read() to block forever — preventing the
+    // Exited event from ever being sent and leaving the tab stuck in Running state.
+    let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
+
     // None = killed, Some(n) = natural exit with code n.
     let _ = tx.send(RunnerEvent::Exited(exit_code));
 }
