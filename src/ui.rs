@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::app::{App, AppState};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -72,6 +72,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     frame.render_widget(Block::default().borders(Borders::ALL).title("Log"), vertical[1]);
 
-    // Status bar: no border
-    frame.render_widget(Paragraph::new("[q]uit"), vertical[2]);
+    // Status bar: no border, content depends on AppState
+    let status_text = match &app.app_state {
+        AppState::Idle => "[r]un  [n]ew  [e]dit  [d]elete  [?]help  [q]uit".to_string(),
+        AppState::Running { iteration } => {
+            format!("[s]top  [q]uit  Running iteration {}/10\u{2026}", iteration)
+        }
+        AppState::Complete => {
+            "COMPLETE  [n]ew  [e]dit  [d]elete  [?]help  [q]uit".to_string()
+        }
+    };
+    frame.render_widget(Paragraph::new(status_text), vertical[2]);
 }

@@ -6,19 +6,33 @@ use std::time::Duration;
 use crate::ralph::plan::Plan;
 use crate::ralph::store::Store;
 
+pub enum AppState {
+    Idle,
+    Running { iteration: u32 },
+    Complete,
+}
+
 pub struct App {
     pub running: bool,
     pub store: Store,
     pub plans: Vec<String>,
     pub selected_plan: Option<usize>,
     pub current_plan: Option<Plan>,
+    pub app_state: AppState,
 }
 
 impl App {
     pub fn new(store: Store) -> Self {
         let plans = store.list_plans();
         let selected_plan = if plans.is_empty() { None } else { Some(0) };
-        let mut app = App { running: true, store, plans, selected_plan, current_plan: None };
+        let mut app = App {
+            running: true,
+            store,
+            plans,
+            selected_plan,
+            current_plan: None,
+            app_state: AppState::Idle,
+        };
         app.load_current_plan();
         app
     }
