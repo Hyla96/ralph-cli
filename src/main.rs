@@ -26,8 +26,11 @@ async fn main() -> Result<()> {
         default_hook(info);
     }));
 
+    // Read terminal size before ratatui::init() switches to alternate screen.
+    let terminal_size = crossterm::terminal::size().unwrap_or((80, 24));
+
     let mut terminal = ratatui::init();
-    let mut app = app::App::new(store);
+    let mut app = app::App::new(store, terminal_size);
     let result = app.run(&mut terminal);
     ratatui::restore();
     result

@@ -55,113 +55,150 @@ pub enum Dialog {
     Help,
 }
 
-/// Spawns `claude --agent ralph` and streams output lines back via `tx`.
+/// Spawns `claude --agent ralph` inside a PTY and streams output lines back via `tx`.
 /// Listens on `kill_rx` for an early termination signal.
-/// Lines received on `stdin_rx` are forwarded (with a trailing `\n`) to the
-/// child's stdin pipe.
+/// Lines received on `stdin_rx` are forwarded (with a trailing `\n`) to the PTY stdin.
 async fn runner_task(
     plan_dir: PathBuf,
     repo_root: PathBuf,
     tx: UnboundedSender<RunnerEvent>,
     kill_rx: oneshot::Receiver<()>,
     mut stdin_rx: UnboundedReceiver<String>,
+    size: (u16, u16),
 ) {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
     eprintln!("[runner] spawning claude in {}", repo_root.display());
     eprintln!("[runner] RALPH_PLAN_DIR={}", plan_dir.display());
 
-    let mut child = match tokio::process::Command::new("claude")
-        .args(["--agent", "ralph", "Implement the next task."])
-        .current_dir(&repo_root)
-        .env("RALPH_PLAN_DIR", &plan_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => {
-            eprintln!("[runner] spawned claude pid={:?}", c.id());
-            c
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("[runner] spawn failed: claude not found on PATH");
-            let _ = tx.send(RunnerEvent::SpawnError("claude not found on PATH".to_string()));
-            return;
-        }
+    let (cols, rows) = size;
+    let pty_system = native_pty_system();
+    let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("[runner] spawn failed: {e}");
-            let _ = tx.send(RunnerEvent::SpawnError(e.to_string()));
+            eprintln!("[runner] PTY open failed: {e}");
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY open failed: {e}")));
             return;
         }
     };
 
-    let child_stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
+    let mut cmd = CommandBuilder::new("claude");
+    cmd.args(["--agent", "ralph", "Implement the next task."]);
+    cmd.cwd(&repo_root);
+    cmd.env("RALPH_PLAN_DIR", &plan_dir);
 
-    // Detached task: forward lines from stdin_rx to the child's stdin pipe.
-    // Exits silently when the channel closes or a write fails.
+    let mut child = match pair.slave.spawn_command(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = e.to_string();
+            let friendly = if msg.contains("No such file") || msg.contains("not found") {
+                "claude not found on PATH".to_string()
+            } else {
+                msg
+            };
+            eprintln!("[runner] spawn failed: {friendly}");
+            let _ = tx.send(RunnerEvent::SpawnError(friendly));
+            return;
+        }
+    };
+
+    eprintln!("[runner] spawned claude pid={:?}", child.process_id());
+
+    // Clone the killer handle so we can signal the child from the select arm
+    // without holding the child borrow (which is blocked in wait()).
+    let mut killer = child.clone_killer();
+
+    // Drop the slave end in the parent so EOF propagates to the master when
+    // the child process exits and closes its inherited slave fd.
+    drop(pair.slave);
+
+    let reader = match pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY reader: {e}")));
+            return;
+        }
+    };
+    let mut writer = match pair.master.take_writer() {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY writer: {e}")));
+            return;
+        }
+    };
+
+    // Read PTY output in a blocking thread: split on newlines, send as Line events.
+    let tx_read = tx.clone();
+    let read_handle = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let mut remainder = String::new();
+        let mut reader = reader;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    remainder.push_str(&chunk);
+                    while let Some(pos) = remainder.find('\n') {
+                        let line = remainder[..pos].trim_end_matches('\r').to_string();
+                        if line.contains("<promise>COMPLETE</promise>") {
+                            let _ = tx_read.send(RunnerEvent::Complete);
+                        }
+                        if tx_read.send(RunnerEvent::Line(line)).is_err() {
+                            return;
+                        }
+                        remainder = remainder[pos + 1..].to_string();
+                    }
+                }
+            }
+        }
+        // Flush any incomplete final line (no trailing newline).
+        if !remainder.is_empty() {
+            let line = remainder.trim_end_matches('\r').to_string();
+            if line.contains("<promise>COMPLETE</promise>") {
+                let _ = tx_read.send(RunnerEvent::Complete);
+            }
+            let _ = tx_read.send(RunnerEvent::Line(line));
+        }
+    });
+
+    // Forward stdin_rx lines to PTY stdin. Writes are small and infrequent
+    // (user keyboard input), so a brief sync write in the async task is acceptable.
     drop(tokio::spawn(async move {
-        let mut writer = child_stdin;
+        use std::io::Write;
         while let Some(line) = stdin_rx.recv().await {
             let mut data = line;
             data.push('\n');
-            if writer.write_all(data.as_bytes()).await.is_err() {
+            if writer.write_all(data.as_bytes()).is_err() {
                 break;
             }
         }
     }));
 
-    let tx_stdout = tx.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.contains("<promise>COMPLETE</promise>") {
-                let _ = tx_stdout.send(RunnerEvent::Complete);
-            }
-            if tx_stdout.send(RunnerEvent::Line(line)).is_err() {
-                break;
-            }
-        }
+    // Wait for the child to exit in a blocking task; signal completion via oneshot.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::task::spawn_blocking(move || {
+        let _ = child.wait();
+        let _ = done_tx.send(());
     });
 
-    let tx_stderr = tx.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.contains("<promise>COMPLETE</promise>") {
-                let _ = tx_stderr.send(RunnerEvent::Complete);
-            }
-            if tx_stderr.send(RunnerEvent::Line(line)).is_err() {
-                break;
-            }
+    let was_killed = tokio::select! {
+        _ = done_rx => {
+            eprintln!("[runner] claude exited naturally");
+            false
         }
-    });
-
-    // Wait for child to exit naturally or for a kill signal.
-    // When kill_rx fires, child.wait() future is dropped (borrow released)
-    // before child.kill() is called below — no simultaneous borrow conflict.
-    let (was_killed, exit_status) = tokio::select! {
-        status = child.wait() => {
-            eprintln!("[runner] claude exited naturally: {status:?}");
-            (false, status.ok())
-        }
-        _ = kill_rx => (true, None),
+        _ = kill_rx => true,
     };
 
     if was_killed {
         eprintln!("[runner] killing claude");
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        let _ = killer.kill();
         eprintln!("[runner] claude killed");
     }
 
-    let _ = exit_status; // logged above
-
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    // Wait for the reader to drain all remaining PTY output before sending Exited.
+    let _ = read_handle.await;
     let _ = tx.send(RunnerEvent::Exited);
 }
 
@@ -180,10 +217,12 @@ pub struct App {
     pub dialog: Option<Dialog>,
     pub status_message: Option<String>,
     pub status_message_expires: Option<Instant>,
+    /// Terminal size at startup; used as initial PTY size for runner tasks.
+    pub initial_size: (u16, u16),
 }
 
 impl App {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, initial_size: (u16, u16)) -> Self {
         let workflows = store.list_workflows();
         let selected_workflow = if workflows.is_empty() { None } else { Some(0) };
         let mut app = App {
@@ -198,6 +237,7 @@ impl App {
             dialog: None,
             status_message: None,
             status_message_expires: None,
+            initial_size,
         };
         app.load_current_workflow();
         app
@@ -776,7 +816,7 @@ impl App {
         }
 
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx,
+            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size,
         )));
     }
 
@@ -815,7 +855,7 @@ impl App {
         }
 
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx,
+            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size,
         )));
     }
 }
