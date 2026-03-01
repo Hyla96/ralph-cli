@@ -39,6 +39,9 @@ pub struct RunnerTab {
     pub stdin_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Scroll offset for the log view (0 = auto-scroll to bottom).
     pub log_scroll: usize,
+    /// When true the runner automatically spawns the next iteration on completion
+    /// without showing the ContinuePrompt dialog.
+    pub auto_continue: bool,
 }
 
 pub enum Dialog {
@@ -377,7 +380,7 @@ impl App {
                 }
             } else {
                 // Runner tab keybindings.
-                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, k/Up, j/Down, G/End.
+                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, k/Up, j/Down, G/End.
                 // All other keys are forwarded as raw bytes via key_to_pty_bytes.
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
@@ -386,6 +389,20 @@ impl App {
                         self.running = false;
                     }
                     KeyCode::Char('s') => self.stop_runner(),
+                    KeyCode::Char('a') => {
+                        let tab_idx = self.active_tab - 1;
+                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                            tab.auto_continue = !tab.auto_continue;
+                            let msg = if tab.auto_continue {
+                                "Auto-continue ON".to_string()
+                            } else {
+                                "Auto-continue OFF".to_string()
+                            };
+                            self.status_message = Some(msg);
+                            self.status_message_expires =
+                                Some(Instant::now() + Duration::from_secs(2));
+                        }
+                    }
                     // Close a Done/Error runner tab; refuse if still Running.
                     KeyCode::Char('x') => {
                         let tab_idx = self.active_tab - 1;
@@ -960,6 +977,7 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
+            tab.auto_continue = false;
             self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
         } else {
             let tab = RunnerTab {
@@ -970,6 +988,7 @@ impl App {
                 runner_kill_tx: Some(kill_tx),
                 stdin_tx: Some(stdin_tx),
                 log_scroll: 0,
+                auto_continue: false,
             };
             self.runner_tabs.push(tab);
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
