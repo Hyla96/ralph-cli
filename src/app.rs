@@ -42,6 +42,12 @@ pub struct RunnerTab {
     /// When true the runner automatically spawns the next iteration on completion
     /// without showing the ContinuePrompt dialog.
     pub auto_continue: bool,
+    /// ID of the task currently being executed (populated from `next_task()` before spawn).
+    pub current_task_id: Option<String>,
+    /// Title of the task currently being executed.
+    pub current_task_title: Option<String>,
+    /// Number of iterations used for this runner tab (starts at 1, incremented by spawn_next_iteration).
+    pub iterations_used: u32,
 }
 
 pub enum Dialog {
@@ -956,6 +962,17 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
+        // Load workflow to populate current task info before spawning.
+        let (current_task_id, current_task_title) = {
+            let workflow_dir = self.store.workflow_dir(&name);
+            match Workflow::load(&workflow_dir).ok().and_then(|w| {
+                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
+            }) {
+                Some((id, title)) => (Some(id), Some(title)),
+                None => (None, None),
+            }
+        };
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -978,6 +995,9 @@ impl App {
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
             tab.auto_continue = false;
+            tab.current_task_id = current_task_id;
+            tab.current_task_title = current_task_title;
+            tab.iterations_used = 1;
             self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
         } else {
             let tab = RunnerTab {
@@ -989,6 +1009,9 @@ impl App {
                 stdin_tx: Some(stdin_tx),
                 log_scroll: 0,
                 auto_continue: false,
+                current_task_id,
+                current_task_title,
+                iterations_used: 1,
             };
             self.runner_tabs.push(tab);
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
@@ -1023,6 +1046,19 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
+        // Load workflow to update current task info before spawning.
+        let (current_task_id, current_task_title) = {
+            let workflow_dir = self.store.workflow_dir(&name);
+            match Workflow::load(&workflow_dir).ok().and_then(|w| {
+                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
+            }) {
+                Some((id, title)) => (Some(id), Some(title)),
+                None => (None, None),
+            }
+        };
+
+        let new_iteration = iteration + 1;
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1032,7 +1068,10 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
-            tab.state = RunnerTabState::Running { iteration: iteration + 1 };
+            tab.state = RunnerTabState::Running { iteration: new_iteration };
+            tab.current_task_id = current_task_id;
+            tab.current_task_title = current_task_title;
+            tab.iterations_used = new_iteration;
         }
 
         self.resize_txs.push(resize_tx);
