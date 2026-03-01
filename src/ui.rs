@@ -140,21 +140,17 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    // Log panel — scroll-aware selection.
-    // log_scroll == 0 → auto-scroll (selected = last line).
-    // log_scroll == N → show the line N positions from the bottom.
+    // Log panel — rendered by tui_term::widget::PseudoTerminal from the vt100 screen.
+    // The vt100 screen's scrollback position (set_scrollback) is updated by the key handlers
+    // so that PseudoTerminal renders the correct view (scrollback or live) without requiring
+    // a mutable App reference in draw. When log_scroll == 0 the live screen is shown;
+    // when log_scroll > 0 the screen is offset into the scrollback buffer.
     let log_title = format!("Runner: {} — Up/k scroll up  End/G bottom", tab.workflow_name);
     let log_block = Block::default().borders(Borders::ALL).title(log_title);
-    if tab.log_lines.is_empty() {
-        frame.render_widget(log_block, layout[0]);
-    } else {
-        let last = tab.log_lines.len() - 1;
-        let selected = last.saturating_sub(tab.log_scroll);
-        let items: Vec<ListItem> =
-            tab.log_lines.iter().map(|l| ListItem::new(l.clone())).collect();
-        let list = List::new(items).block(log_block);
-        let mut log_state = ListState::default().with_selected(Some(selected));
-        frame.render_stateful_widget(list, layout[0], &mut log_state);
+    {
+        use tui_term::widget::PseudoTerminal;
+        let pseudo_term = PseudoTerminal::new(tab.parser.screen()).block(log_block);
+        frame.render_widget(pseudo_term, layout[0]);
     }
 
     // Status line: transient messages take priority; otherwise show runner state.
