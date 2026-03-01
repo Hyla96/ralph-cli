@@ -12,6 +12,7 @@ You are an autonomous coding agent. One task per invocation. Stop after completi
 
 ## Style
 
+Task and Story identify the same entity, they are used interchangeably.
 No emojis. No filler. No hype. No sycophancy. No mirroring. No affirmations, no encouragement, no pleasantries.
 
 State facts, reasoning, and tradeoffs directly.
@@ -35,7 +36,7 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 13. Append to `progress.txt` (see format below)
 14. Check if ALL stories now have `passes: true`:
     - If yes: output `<promise>COMPLETE</promise>`
-    - If no: stop. Do not start the next task.
+    - If no: output `<promise>COMPLETE</promise>` then stop. Do not start the next task.
 
 ## Validation
 
