@@ -6,12 +6,13 @@ use ratatui::DefaultTerminal;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use vt100::Parser as VtParser;
 
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
+use crate::ralph::watcher::{Watcher, WatcherEvent};
 use crate::ralph::workflow::Workflow;
 
 // Maximum number of ralph loop iterations before the loop stops automatically.
@@ -249,12 +250,29 @@ pub struct App {
     /// One sender per active runner task; used to propagate terminal resize events.
     /// Dead senders (task exited) are pruned lazily when the next resize event arrives.
     pub resize_txs: Vec<UnboundedSender<(u16, u16)>>,
+    /// Receives file-change notifications from the OS-native watcher.
+    /// `None` when the watcher failed to start.
+    pub watcher_rx: Option<Receiver<WatcherEvent>>,
+    /// Keeps the OS watcher alive. Dropping this stops watching.
+    pub _watcher: Option<Watcher>,
 }
 
 impl App {
     pub fn new(store: Store, initial_size: (u16, u16)) -> Self {
         let workflows = store.list_workflows();
         let selected_workflow = if workflows.is_empty() { None } else { Some(0) };
+
+        // Capture the root path before `store` is moved into the App struct.
+        let root = store.root().to_path_buf();
+
+        // Start OS-native file watcher. Gracefully degrade if it fails.
+        let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel::<WatcherEvent>(64);
+        let (watcher_opt, watcher_rx_opt, watcher_warning) =
+            match Watcher::start(&root, watcher_tx) {
+                Ok(w) => (Some(w), Some(watcher_rx), None),
+                Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
+            };
+
         let mut app = App {
             running: true,
             store,
@@ -265,10 +283,12 @@ impl App {
             active_tab: 0,
             tab_nav_pending: false,
             dialog: None,
-            status_message: None,
+            status_message: watcher_warning,
             status_message_expires: None,
             initial_size,
             resize_txs: Vec::new(),
+            watcher_rx: watcher_rx_opt,
+            _watcher: watcher_opt,
         };
         app.load_current_workflow();
         app
@@ -278,6 +298,10 @@ impl App {
         while self.running {
             self.check_status_timeout();
             self.drain_runner_channels();
+            let watcher_events = self.drain_watcher_channel();
+            if !watcher_events.is_empty() {
+                self.reload_all();
+            }
             if let Err(e) = terminal.draw(|frame| crate::ui::draw(frame, self)) {
                 self.display_error(e.to_string());
             }
@@ -645,6 +669,83 @@ impl App {
         {
             self.status_message = None;
             self.status_message_expires = None;
+        }
+    }
+
+    /// Drains all pending watcher events into a local Vec (non-blocking try_recv loop).
+    /// Returns the collected events; an empty Vec means no file changes this tick.
+    fn drain_watcher_channel(&mut self) -> Vec<WatcherEvent> {
+        let Some(rx) = self.watcher_rx.as_mut() else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Reloads all plan data from disk in response to a file-watcher event.
+    ///
+    /// Refreshes the workflow list, restores (or adjusts) the current selection,
+    /// reloads the displayed workflow, and clears any stale `ContinuePrompt` dialog.
+    /// Does not interrupt active runner subprocesses.
+    pub fn reload_all(&mut self) {
+        // Remember the currently selected workflow name to restore after the list refresh.
+        let old_name = self.selected_workflow.and_then(|i| self.workflows.get(i).cloned());
+
+        // Refresh the workflow list from disk.
+        self.workflows = self.store.list_workflows();
+
+        // Restore selection: prefer the same workflow by name; fall back to first, or None.
+        self.selected_workflow = match &old_name {
+            Some(name) => self
+                .workflows
+                .iter()
+                .position(|p| p == name)
+                .or(if self.workflows.is_empty() { None } else { Some(0) }),
+            None => {
+                if self.workflows.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
+            }
+        };
+
+        // Reload the currently selected workflow from disk.
+        self.load_current_workflow();
+
+        // Clear a stale ContinuePrompt if the referenced task no longer needs to run.
+        if let Some(Dialog::ContinuePrompt { next_id, .. }) = &self.dialog {
+            let next_id_clone = next_id.clone();
+
+            // Find the workflow name for the active runner tab.
+            let tab_workflow_name = (self.active_tab > 0)
+                .then(|| self.runner_tabs.get(self.active_tab - 1))
+                .flatten()
+                .map(|t| t.workflow_name.clone());
+
+            let task_still_pending = tab_workflow_name
+                .as_ref()
+                .map(|name| {
+                    let dir = self.store.workflow_dir(name);
+                    Workflow::load(&dir)
+                        .ok()
+                        .map(|w| w.prd.tasks.iter().any(|t| t.id == next_id_clone && !t.passes))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if !task_still_pending {
+                self.dialog = None;
+                if self.active_tab > 0
+                    && let Some(tab) = self.runner_tabs.get_mut(self.active_tab - 1)
+                    && matches!(tab.state, RunnerTabState::Running { .. })
+                {
+                    tab.state = RunnerTabState::Done;
+                }
+            }
         }
     }
 
