@@ -3,4 +3,5 @@ pub enum RunnerEvent {
     Exited,
     Complete,
     SpawnError(String),
+    Resize(u16, u16),
 }

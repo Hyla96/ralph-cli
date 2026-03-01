@@ -77,6 +77,7 @@ async fn runner_task(
     kill_rx: oneshot::Receiver<()>,
     mut stdin_rx: UnboundedReceiver<Vec<u8>>,
     size: (u16, u16),
+    resize_rx: UnboundedReceiver<(u16, u16)>,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -124,14 +125,17 @@ async fn runner_task(
     // the child process exits and closes its inherited slave fd.
     drop(pair.slave);
 
-    let reader = match pair.master.try_clone_reader() {
+    // Extract master so it can be moved into the resize task after reader/writer are taken.
+    let master = pair.master;
+
+    let reader = match master.try_clone_reader() {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(RunnerEvent::SpawnError(format!("PTY reader: {e}")));
             return;
         }
     };
-    let mut writer = match pair.master.take_writer() {
+    let mut writer = match master.take_writer() {
         Ok(w) => w,
         Err(e) => {
             let _ = tx.send(RunnerEvent::SpawnError(format!("PTY writer: {e}")));
@@ -183,6 +187,16 @@ async fn runner_task(
             if writer.write_all(&bytes).is_err() {
                 break;
             }
+        }
+    }));
+
+    // Forward resize events to the PTY master. master is moved here after
+    // reader/writer are already extracted.
+    drop(tokio::spawn(async move {
+        use portable_pty::PtySize;
+        let mut resize_rx = resize_rx;
+        while let Some((cols, rows)) = resize_rx.recv().await {
+            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
     }));
 
@@ -262,6 +276,9 @@ pub struct App {
     pub status_message_expires: Option<Instant>,
     /// Terminal size at startup; used as initial PTY size for runner tasks.
     pub initial_size: (u16, u16),
+    /// One sender per active runner task; used to propagate terminal resize events.
+    /// Dead senders (task exited) are pruned lazily when the next resize event arrives.
+    pub resize_txs: Vec<UnboundedSender<(u16, u16)>>,
 }
 
 impl App {
@@ -281,6 +298,7 @@ impl App {
             status_message: None,
             status_message_expires: None,
             initial_size,
+            resize_txs: Vec::new(),
         };
         app.load_current_workflow();
         app
@@ -307,16 +325,23 @@ impl App {
     }
 
     fn handle_events(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            if self.dialog.is_some() {
-                self.handle_dialog_key(key.code);
-            } else if self.tab_nav_pending {
-                // Consume the chord: always clear the flag, then act.
-                self.tab_nav_pending = false;
-                self.handle_tab_nav_key(key.code);
-            } else if self.active_tab == 0 {
+        if !event::poll(Duration::from_millis(100))? {
+            return Ok(());
+        }
+        match event::read()? {
+            Event::Resize(cols, rows) => {
+                // Broadcast new size to all active PTY runners; prune dead senders.
+                self.resize_txs.retain(|tx| tx.send((cols, rows)).is_ok());
+            }
+            Event::Key(key) => {
+                #[allow(clippy::collapsible_else_if)]
+                if self.dialog.is_some() {
+                    self.handle_dialog_key(key.code);
+                } else if self.tab_nav_pending {
+                    // Consume the chord: always clear the flag, then act.
+                    self.tab_nav_pending = false;
+                    self.handle_tab_nav_key(key.code);
+                } else if self.active_tab == 0 {
                 // Workflows tab keybindings.
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
@@ -402,8 +427,10 @@ impl App {
                         }
                     }
                 }
-            }
-        }
+            }   // closes else { block
+            }   // closes Event::Key(key) => { arm body
+            _ => {} // other events (mouse, focus, paste, …) are ignored
+        }       // closes match event::read()?
         Ok(())
     }
 
@@ -668,6 +695,7 @@ impl App {
                 match rx.try_recv() {
                     Ok(RunnerEvent::Line(line)) => lines.push(line),
                     Ok(RunnerEvent::Complete) => complete = true,
+                    Ok(RunnerEvent::Resize(_, _)) => {} // resize acks via separate channel; ignore
                     Ok(RunnerEvent::Exited) => {
                         done = true;
                         break;
@@ -794,6 +822,7 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
 
         // Reuse an existing Done/Error tab for this workflow rather than accumulating tabs.
         let reuse_idx = self.runner_tabs.iter().position(|t| {
@@ -824,8 +853,9 @@ impl App {
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
         }
 
+        self.resize_txs.push(resize_tx);
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size,
+            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
         )));
     }
 
@@ -855,6 +885,7 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
 
         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
             tab.runner_rx = Some(rx);
@@ -863,8 +894,9 @@ impl App {
             tab.state = RunnerTabState::Running { iteration: iteration + 1 };
         }
 
+        self.resize_txs.push(resize_tx);
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size,
+            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
         )));
     }
 }
