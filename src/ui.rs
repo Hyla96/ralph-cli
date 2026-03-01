@@ -1,4 +1,4 @@
-use crate::app::{App, Dialog, RunnerTab, RunnerTabState};
+use crate::app::{App, Dialog, RunnerTabState};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -16,9 +16,34 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_tab_bar(frame, app, outer[0]);
 
-    // Content area below tab bar
     let content = outer[1];
 
+    if app.active_tab == 0 {
+        draw_workflows_tab(frame, app, content);
+    } else {
+        draw_runner_tab(frame, app, content);
+    }
+
+    // Render dialog overlays on top of everything else
+    match &app.dialog {
+        Some(Dialog::NewWorkflow { input, error }) => {
+            draw_new_workflow_dialog(frame, frame.area(), input, error);
+        }
+        Some(Dialog::DeleteWorkflow { name }) => {
+            draw_delete_workflow_dialog(frame, frame.area(), name);
+        }
+        Some(Dialog::ContinuePrompt { next_id, next_title }) => {
+            draw_continue_prompt_dialog(frame, frame.area(), next_id, next_title);
+        }
+        Some(Dialog::Help) => {
+            draw_help_dialog(frame, frame.area());
+        }
+        None => {}
+    }
+}
+
+/// Renders the Workflows tab: workflow list (left) | tasks (right) | log panel | status bar.
+fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
     // Outer vertical split: top panels (~75%) | log (~20%) | status bar (1 line)
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -27,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Percentage(20),
             Constraint::Length(1),
         ])
-        .split(content);
+        .split(area);
 
     // Top row: Workflows (~25%) | Tasks (~75%)
     let top = Layout::default()
@@ -83,116 +108,125 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
     }
 
-    // Log panel: show log lines from the active runner tab; empty when on Workflows tab.
-    let active_runner: Option<&RunnerTab> = if app.active_tab > 0 {
-        app.runner_tabs.get(app.active_tab - 1)
-    } else {
-        None
-    };
-
+    // Log panel: empty on the Workflows tab (runner logs live on runner tabs).
     let log_block = Block::default().borders(Borders::ALL).title("Log");
-    match active_runner {
-        None => {
-            frame.render_widget(log_block, vertical[1]);
-        }
-        Some(tab) if tab.log_lines.is_empty() => {
-            frame.render_widget(log_block, vertical[1]);
-        }
-        Some(tab) => {
-            let items: Vec<ListItem> =
-                tab.log_lines.iter().map(|l| ListItem::new(l.as_str())).collect();
-            let list = List::new(items).block(log_block);
-            let selected = if matches!(tab.state, RunnerTabState::Running { .. }) {
-                Some(tab.log_lines.len().saturating_sub(1))
-            } else {
-                None
-            };
-            let mut log_state = ListState::default().with_selected(selected);
-            frame.render_stateful_widget(list, vertical[1], &mut log_state);
-        }
-    }
+    frame.render_widget(log_block, vertical[1]);
 
-    // Status bar: no border, content depends on active tab and runner state.
+    // Status bar: workflow management hints.
     let status_text = if let Some(msg) = &app.status_message {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Red)))
     } else {
-        let hint = match active_runner {
-            None => "[r]un  [n]ew  [e]dit  [d]elete  [?]help  [q]uit".to_string(),
-            Some(tab) => match &tab.state {
-                RunnerTabState::Running { iteration } => {
-                    format!("[s]top  [q]uit  Running iteration {}/10\u{2026}", iteration)
-                }
-                RunnerTabState::Done => {
-                    "Done  [n]ew  [e]dit  [d]elete  [?]help  [q]uit".to_string()
-                }
-                RunnerTabState::Error(msg) => {
-                    format!("Error: {}  [q]uit", msg)
-                }
-            },
-        };
-        Line::from(hint)
+        Line::from("[r]un  [n]ew  [e]dit  [d]elete  [?]help  [q]uit")
     };
     frame.render_widget(Paragraph::new(status_text), vertical[2]);
+}
 
-    // Render dialog overlays on top of everything else
-    match &app.dialog {
-        Some(Dialog::NewWorkflow { input, error }) => {
-            draw_new_workflow_dialog(frame, frame.area(), input, error);
-        }
-        Some(Dialog::DeleteWorkflow { name }) => {
-            draw_delete_workflow_dialog(frame, frame.area(), name);
-        }
-        Some(Dialog::ContinuePrompt { next_id, next_title }) => {
-            draw_continue_prompt_dialog(frame, frame.area(), next_id, next_title);
-        }
-        Some(Dialog::Help) => {
-            draw_help_dialog(frame, frame.area());
-        }
-        None => {}
+/// Renders an active runner tab: log panel (top) | status bar (bottom 1 line).
+///
+/// TASK-006 will restructure this into log view + status line + input row.
+/// TASK-007 will wire up the input buffer.
+fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let tab = match app.runner_tabs.get(app.active_tab - 1) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Split: log panel (flexible) | status bar (1 line)
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    // Log panel
+    let log_title = format!("Runner: {}", tab.workflow_name);
+    let log_block = Block::default().borders(Borders::ALL).title(log_title);
+    if tab.log_lines.is_empty() {
+        frame.render_widget(log_block, layout[0]);
+    } else {
+        let items: Vec<ListItem> =
+            tab.log_lines.iter().map(|l| ListItem::new(l.as_str())).collect();
+        let list = List::new(items).block(log_block);
+        // Auto-scroll to the bottom (TASK-006 will add manual scroll support).
+        let selected = Some(tab.log_lines.len().saturating_sub(1));
+        let mut log_state = ListState::default().with_selected(selected);
+        frame.render_stateful_widget(list, layout[0], &mut log_state);
     }
+
+    // Status bar: runner state hints.
+    let status_text = if let Some(msg) = &app.status_message {
+        Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Red)))
+    } else {
+        match &tab.state {
+            RunnerTabState::Running { iteration } => {
+                Line::from(format!(
+                    "[s]top  [q]uit  Running iteration {}/10\u{2026}",
+                    iteration
+                ))
+            }
+            RunnerTabState::Done => Line::from("[q]uit  Done"),
+            RunnerTabState::Error(msg) => Line::from(Span::styled(
+                format!("Error: {msg}  [q]uit"),
+                Style::default().fg(Color::Red),
+            )),
+        }
+    };
+    frame.render_widget(Paragraph::new(status_text), layout[1]);
 }
 
 /// Renders the single-line tab bar at the top of the screen.
 ///
-/// Tab 0 is always `[Workflows]`. Runner tabs show `[name]`, `[name ✓]`, or `[name !]`.
-/// The active tab is highlighted with REVERSED style. Tabs that don't fit are cropped.
+/// Tabs are space-padded and separated by `│`. The active tab is REVERSED+BOLD;
+/// inactive tabs are dimmed. Any remaining width is filled to extend the bar.
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    // Build the full list of (label, is_active) entries up front.
+    let mut entries: Vec<(String, bool)> = Vec::new();
+
+    entries.push((" Workflows ".to_string(), app.active_tab == 0));
+
+    for (i, tab) in app.runner_tabs.iter().enumerate() {
+        let suffix = match &tab.state {
+            RunnerTabState::Running { .. } => "",
+            RunnerTabState::Done => " \u{2713}",  // ✓
+            RunnerTabState::Error(_) => " !",
+        };
+        entries.push((
+            format!(" {}{} ", tab.workflow_name, suffix),
+            app.active_tab == i + 1,
+        ));
+    }
+
+    let sep_style = Style::default().fg(Color::DarkGray);
+    let inactive_style = Style::default().fg(Color::DarkGray);
+    let active_style =
+        Style::default().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD);
+
     let mut spans: Vec<Span> = Vec::new();
     let mut used_width: u16 = 0;
 
-    // Tab 0: Workflows
-    let label = "[Workflows]";
-    let label_w = label.chars().count() as u16;
-    if used_width + label_w <= area.width {
-        let style = if app.active_tab == 0 {
-            Style::default().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(label, style));
-        used_width += label_w;
-    }
+    for (idx, (label, is_active)) in entries.iter().enumerate() {
+        // Separator between tabs (not before the first one).
+        if idx > 0 {
+            if used_width + 1 > area.width {
+                break;
+            }
+            spans.push(Span::styled("\u{2502}", sep_style)); // │
+            used_width += 1;
+        }
 
-    // Runner tabs (1-indexed in active_tab)
-    for (i, tab) in app.runner_tabs.iter().enumerate() {
-        let tab_idx = i + 1;
-        let suffix = match &tab.state {
-            RunnerTabState::Running { .. } => String::new(),
-            RunnerTabState::Done => " \u{2713}".to_string(),  // ✓
-            RunnerTabState::Error(_) => " !".to_string(),
-        };
-        let label = format!("[{}{}]", tab.workflow_name, suffix);
         let label_w = label.chars().count() as u16;
         if used_width + label_w > area.width {
             break;
         }
-        let style = if app.active_tab == tab_idx {
-            Style::default().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(label, style));
+
+        let style = if *is_active { active_style } else { inactive_style };
+        spans.push(Span::styled(label.as_str(), style));
         used_width += label_w;
+    }
+
+    // Fill the rest of the bar so it reads as a continuous strip.
+    if used_width < area.width {
+        let pad = " ".repeat((area.width - used_width) as usize);
+        spans.push(Span::raw(pad));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

@@ -218,7 +218,8 @@ impl App {
                 // Consume the chord: always clear the flag, then act.
                 self.tab_nav_pending = false;
                 self.handle_tab_nav_key(key.code);
-            } else {
+            } else if self.active_tab == 0 {
+                // Workflows tab keybindings.
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
                     KeyCode::Char('q') => self.running = false,
@@ -233,6 +234,19 @@ impl App {
                     KeyCode::Char('e') => self.edit_current_plan(terminal)?,
                     KeyCode::Char('d') => self.open_delete_workflow_dialog(),
                     KeyCode::Char('?') => self.open_help_dialog(),
+                    _ => {}
+                }
+            } else {
+                // Runner tab keybindings.
+                // TASK-006 adds log scroll (Up/Down/k/j/End/G).
+                // TASK-007 adds input buffer (printable chars, Backspace, Enter, Esc).
+                match key.code {
+                    KeyCode::Char('t') => self.tab_nav_pending = true,
+                    KeyCode::Char('q') => self.running = false,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.running = false;
+                    }
+                    KeyCode::Char('s') => self.stop_runner(),
                     _ => {}
                 }
             }
