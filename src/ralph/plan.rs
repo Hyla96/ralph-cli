@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserStory {
+pub struct Task {
     pub id: String,
     pub title: String,
     pub description: String,
@@ -22,8 +22,8 @@ pub struct PrdJson {
     pub description: String,
     #[serde(rename = "validationCommands")]
     pub validation_commands: Vec<String>,
-    #[serde(rename = "userStories")]
-    pub user_stories: Vec<UserStory>,
+    #[serde(rename = "tasks")]
+    pub tasks: Vec<Task>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,27 +52,27 @@ impl Plan {
         Ok(())
     }
 
-    /// Returns the count of stories where `passes == true`.
+    /// Returns the count of tasks where `passes == true`.
     pub fn done_count(&self) -> usize {
-        self.prd.user_stories.iter().filter(|s| s.passes).count()
+        self.prd.tasks.iter().filter(|t| t.passes).count()
     }
 
-    /// Returns the total number of stories.
+    /// Returns the total number of tasks.
     pub fn total_count(&self) -> usize {
-        self.prd.user_stories.len()
+        self.prd.tasks.len()
     }
 
-    /// Returns the first story where `passes == false`, sorted by `priority` ascending.
-    pub fn next_story(&self) -> Option<&UserStory> {
+    /// Returns the first task where `passes == false`, sorted by `priority` ascending.
+    pub fn next_task(&self) -> Option<&Task> {
         self.prd
-            .user_stories
+            .tasks
             .iter()
-            .filter(|s| !s.passes)
-            .min_by_key(|s| s.priority)
+            .filter(|t| !t.passes)
+            .min_by_key(|t| t.priority)
     }
 
-    /// Returns `true` if all stories have `passes == true`.
+    /// Returns `true` if all tasks have `passes == true`.
     pub fn is_complete(&self) -> bool {
-        self.prd.user_stories.iter().all(|s| s.passes)
+        self.prd.tasks.iter().all(|t| t.passes)
     }
 }

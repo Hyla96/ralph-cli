@@ -477,9 +477,9 @@ impl App {
                     } else {
                         // Natural exit, plan not complete, within iteration limit.
                         // Show continue prompt so the user decides whether to proceed.
-                        let next = self.current_plan.as_ref().and_then(|p| p.next_story());
+                        let next = self.current_plan.as_ref().and_then(|p| p.next_task());
                         let (next_id, next_title) = next
-                            .map(|s| (s.id.clone(), s.title.clone()))
+                            .map(|t| (t.id.clone(), t.title.clone()))
                             .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
                         self.dialog = Some(Dialog::ContinuePrompt { next_id, next_title });
                         // Keep AppState::Running { iteration } while awaiting

@@ -65,7 +65,7 @@ impl Store {
             "branchName": "",
             "description": "",
             "validationCommands": [],
-            "userStories": []
+            "tasks": []
         });
         let json = serde_json::to_string_pretty(&starter)?;
         std::fs::write(dir.join("prd.json"), json)

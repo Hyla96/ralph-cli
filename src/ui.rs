@@ -18,7 +18,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(frame.area());
 
-    // Top row: Plans (~25%) | Stories (~75%)
+    // Top row: Plans (~25%) | Tasks (~75%)
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
@@ -42,24 +42,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_stateful_widget(list, top[0], &mut list_state);
     }
 
-    // Stories panel
+    // Tasks panel
     match &app.current_plan {
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Stories");
+            let block = Block::default().borders(Borders::ALL).title("Tasks");
             frame.render_widget(Paragraph::new("Select a plan").block(block), top[1]);
         }
         Some(plan) => {
-            let title = format!("Stories ({}/{})", plan.done_count(), plan.total_count());
+            let title = format!("Tasks ({}/{})", plan.done_count(), plan.total_count());
             let block = Block::default().borders(Borders::ALL).title(title);
             let items: Vec<ListItem> = plan
                 .prd
-                .user_stories
+                .tasks
                 .iter()
-                .map(|story| {
-                    let check = if story.passes { "✓" } else { "○" };
+                .map(|task| {
+                    let check = if task.passes { "✓" } else { "○" };
                     let text =
-                        format!("{} [{}] {}: {}", check, story.priority, story.id, story.title);
-                    let style = if story.passes {
+                        format!("{} [{}] {}: {}", check, task.priority, task.id, task.title);
+                    let style = if task.passes {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default()
@@ -153,7 +153,7 @@ fn draw_continue_prompt_dialog(
     frame.render_widget(Clear, dialog_rect);
 
     let lines = vec![
-        Line::from("Story done. Continue? [Y/n]"),
+        Line::from("Task done. Continue? [Y/n]"),
         Line::from(format!("Next: {next_id}: {next_title}")),
     ];
     let block = Block::default().borders(Borders::ALL).title("Continue?");
