@@ -126,9 +126,7 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
 /// Layout (from top to bottom):
 ///   log view  — flexible height, scrollable; log_scroll==0 auto-scrolls to newest line
 ///   status line — 1 line: shows Running/Done/Error state or a transient status message
-///   input row — 1 line: shows `> {input_buffer}` (buffer wired up in TASK-007)
-///
-/// TASK-007 will wire up the input buffer (printable chars, Backspace, Enter, Esc).
+///   input row — 1 line: shows `> {input_buffer}`; printable chars, Backspace, Enter, Esc handled in app.rs
 fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     let tab = match app.runner_tabs.get(app.active_tab - 1) {
         Some(t) => t,
@@ -175,7 +173,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(Paragraph::new(status_text), layout[1]);
 
-    // Input row placeholder — TASK-007 will render `> {input_buffer}` and handle keystrokes.
+    // Input row: `> {input_buffer}`. Keystrokes are handled in app.rs.
     let input_text = format!("> {}", tab.input_buffer);
     frame.render_widget(Paragraph::new(input_text.as_str()), layout[2]);
 }

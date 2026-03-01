@@ -238,7 +238,6 @@ impl App {
                 }
             } else {
                 // Runner tab keybindings.
-                // TASK-007 adds input buffer (printable chars, Backspace, Enter, Esc).
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
                     KeyCode::Char('q') => self.running = false,
@@ -269,6 +268,50 @@ impl App {
                         let tab_idx = self.active_tab - 1;
                         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
                             tab.log_scroll = 0;
+                        }
+                    }
+                    // Input buffer: Backspace removes last char.
+                    KeyCode::Backspace => {
+                        let tab_idx = self.active_tab - 1;
+                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                            tab.input_buffer.pop();
+                        }
+                    }
+                    // Input buffer: Enter sends trimmed buffer via stdin_tx (if active).
+                    KeyCode::Enter => {
+                        let tab_idx = self.active_tab - 1;
+                        // Extract result inside the borrow scope so self.status_message
+                        // can be set after the borrow on runner_tabs is released.
+                        let error_msg = self.runner_tabs.get_mut(tab_idx).and_then(|tab| {
+                            let trimmed = tab.input_buffer.trim().to_string();
+                            tab.input_buffer.clear();
+                            if let Some(tx) = &tab.stdin_tx {
+                                let _ = tx.send(trimmed);
+                                None
+                            } else {
+                                Some("Runner is not active".to_string())
+                            }
+                        });
+                        if let Some(msg) = error_msg {
+                            self.status_message = Some(msg);
+                            self.status_message_expires =
+                                Some(Instant::now() + Duration::from_secs(2));
+                        }
+                    }
+                    // Input buffer: Esc clears without sending.
+                    KeyCode::Esc => {
+                        let tab_idx = self.active_tab - 1;
+                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                            tab.input_buffer.clear();
+                        }
+                    }
+                    // Input buffer: append any remaining printable char.
+                    // Specific chars (t/q/s/k/j/G and Ctrl+C) are caught by earlier arms
+                    // so they never reach here.
+                    KeyCode::Char(c) if !c.is_control() => {
+                        let tab_idx = self.active_tab - 1;
+                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                            tab.input_buffer.push(c);
                         }
                     }
                     _ => {}
