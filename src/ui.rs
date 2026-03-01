@@ -121,22 +121,23 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(status_text), vertical[2]);
 }
 
-/// Renders an active runner tab: log panel (top) | status line | input row (bottom).
+/// Renders an active runner tab: log panel (top) | status line (bottom).
 ///
 /// Layout (from top to bottom):
 ///   log view  — flexible height, scrollable; log_scroll==0 auto-scrolls to newest line
 ///   status line — 1 line: shows Running/Done/Error state or a transient status message
-///   input row — 1 line: shows `> {input_buffer}`; printable chars, Backspace, Enter, Esc handled in app.rs
+///
+/// Keyboard input is forwarded directly to the PTY as raw bytes (no input buffer row).
 fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     let tab = match app.runner_tabs.get(app.active_tab - 1) {
         Some(t) => t,
         None => return,
     };
 
-    // Split: log panel (flexible) | status line (1 line) | input row (1 line)
+    // Split: log panel (flexible) | status line (1 line)
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
     // Log panel — scroll-aware selection.
@@ -173,9 +174,6 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(Paragraph::new(status_text), layout[1]);
 
-    // Input row: `> {input_buffer}`. Keystrokes are handled in app.rs.
-    let input_text = format!("> {}", tab.input_buffer);
-    frame.render_widget(Paragraph::new(input_text.as_str()), layout[2]);
 }
 
 /// Renders the single-line tab bar at the top of the screen.

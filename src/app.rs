@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
@@ -33,9 +33,8 @@ pub struct RunnerTab {
     pub state: RunnerTabState,
     pub runner_rx: Option<UnboundedReceiver<RunnerEvent>>,
     pub runner_kill_tx: Option<oneshot::Sender<()>>,
-    /// Sender used to deliver stdin lines to the claude subprocess (set in TASK-002).
-    pub stdin_tx: Option<UnboundedSender<String>>,
-    pub input_buffer: String,
+    /// Sender used to deliver raw bytes to the PTY stdin.
+    pub stdin_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Scroll offset for the log view (0 = auto-scroll to bottom).
     pub log_scroll: usize,
 }
@@ -76,7 +75,7 @@ async fn runner_task(
     repo_root: PathBuf,
     tx: UnboundedSender<RunnerEvent>,
     kill_rx: oneshot::Receiver<()>,
-    mut stdin_rx: UnboundedReceiver<String>,
+    mut stdin_rx: UnboundedReceiver<Vec<u8>>,
     size: (u16, u16),
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -176,14 +175,12 @@ async fn runner_task(
         }
     });
 
-    // Forward stdin_rx lines to PTY stdin. Writes are small and infrequent
+    // Forward stdin_rx bytes to PTY stdin. Writes are small and infrequent
     // (user keyboard input), so a brief sync write in the async task is acceptable.
     drop(tokio::spawn(async move {
         use std::io::Write;
-        while let Some(line) = stdin_rx.recv().await {
-            let mut data = line;
-            data.push('\n');
-            if writer.write_all(data.as_bytes()).is_err() {
+        while let Some(bytes) = stdin_rx.recv().await {
+            if writer.write_all(&bytes).is_err() {
                 break;
             }
         }
@@ -213,6 +210,39 @@ async fn runner_task(
     // Wait for the reader to drain all remaining PTY output before sending Exited.
     let _ = read_handle.await;
     let _ = tx.send(RunnerEvent::Exited);
+}
+
+/// Maps a crossterm `KeyEvent` to the raw bytes that should be sent to the PTY.
+///
+/// Returns `None` for keys that have no meaningful PTY representation (function
+/// keys, media keys, etc.).  The caller is responsible for intercepting keys
+/// that should NOT be forwarded (t, q, s, x, k/Up, j/Down, G/End, Ctrl+C).
+fn key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    // Ctrl+letter → control byte (Ctrl+A = 1 … Ctrl+Z = 26).
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && let KeyCode::Char(c) = key.code
+    {
+        let lower = c.to_ascii_lowercase();
+        if lower.is_ascii_alphabetic() {
+            return Some(vec![lower as u8 - b'a' + 1]);
+        }
+    }
+
+    match key.code {
+        KeyCode::Char(c) => {
+            let mut buf = [0u8; 4];
+            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+        }
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Backspace => Some(vec![b'\x7f']),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Esc => Some(vec![b'\x1b']),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        _ => None,
+    }
 }
 
 pub struct App {
@@ -306,6 +336,8 @@ impl App {
                 }
             } else {
                 // Runner tab keybindings.
+                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, k/Up, j/Down, G/End.
+                // All other keys are forwarded as raw bytes via key_to_pty_bytes.
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
                     KeyCode::Char('q') => self.running = false,
@@ -358,51 +390,17 @@ impl App {
                             tab.log_scroll = 0;
                         }
                     }
-                    // Input buffer: Backspace removes last char.
-                    KeyCode::Backspace => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.input_buffer.pop();
-                        }
-                    }
-                    // Input buffer: Enter sends trimmed buffer via stdin_tx (if active).
-                    KeyCode::Enter => {
-                        let tab_idx = self.active_tab - 1;
-                        // Extract result inside the borrow scope so self.status_message
-                        // can be set after the borrow on runner_tabs is released.
-                        let error_msg = self.runner_tabs.get_mut(tab_idx).and_then(|tab| {
-                            let trimmed = tab.input_buffer.trim().to_string();
-                            tab.input_buffer.clear();
-                            if let Some(tx) = &tab.stdin_tx {
-                                let _ = tx.send(trimmed);
-                                None
-                            } else {
-                                Some("Runner is not active".to_string())
+                    // All other keys are forwarded directly to the PTY as raw bytes.
+                    _ => {
+                        if let Some(bytes) = key_to_pty_bytes(key) {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get(tab_idx)
+                                && let Some(tx) = &tab.stdin_tx
+                            {
+                                let _ = tx.send(bytes);
                             }
-                        });
-                        if let Some(msg) = error_msg {
-                            self.status_message = Some(msg);
-                            self.status_message_expires =
-                                Some(Instant::now() + Duration::from_secs(2));
                         }
                     }
-                    // Input buffer: Esc clears without sending.
-                    KeyCode::Esc => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.input_buffer.clear();
-                        }
-                    }
-                    // Input buffer: append any remaining printable char.
-                    // Specific chars (t/q/s/k/j/G and Ctrl+C) are caught by earlier arms
-                    // so they never reach here.
-                    KeyCode::Char(c) if !c.is_control() => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.input_buffer.push(c);
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -795,7 +793,7 @@ impl App {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
-        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         // Reuse an existing Done/Error tab for this workflow rather than accumulating tabs.
         let reuse_idx = self.runner_tabs.iter().position(|t| {
@@ -807,7 +805,6 @@ impl App {
             let tab = &mut self.runner_tabs[reuse];
             tab.log_lines.clear();
             tab.log_scroll = 0;
-            tab.input_buffer.clear();
             tab.state = RunnerTabState::Running { iteration: 1 };
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
@@ -821,7 +818,6 @@ impl App {
                 runner_rx: Some(rx),
                 runner_kill_tx: Some(kill_tx),
                 stdin_tx: Some(stdin_tx),
-                input_buffer: String::new(),
                 log_scroll: 0,
             };
             self.runner_tabs.push(tab);
@@ -858,7 +854,7 @@ impl App {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
-        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
             tab.runner_rx = Some(rx);
