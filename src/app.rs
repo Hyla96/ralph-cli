@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
-use crate::ralph::plan::Plan;
+use crate::ralph::workflow::Workflow;
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
 
@@ -112,7 +112,7 @@ pub struct App {
     pub store: Store,
     pub plans: Vec<String>,
     pub selected_plan: Option<usize>,
-    pub current_plan: Option<Plan>,
+    pub current_workflow: Option<Workflow>,
     pub app_state: AppState,
     pub dialog: Option<Dialog>,
     pub status_message: Option<String>,
@@ -131,7 +131,7 @@ impl App {
             store,
             plans,
             selected_plan,
-            current_plan: None,
+            current_workflow: None,
             app_state: AppState::Idle,
             dialog: None,
             status_message: None,
@@ -140,7 +140,7 @@ impl App {
             runner_rx: None,
             runner_kill_tx: None,
         };
-        app.load_current_plan();
+        app.load_current_workflow();
         app
     }
 
@@ -224,8 +224,8 @@ impl App {
             }
         }
 
-        // Reload plan from disk so updated stories are immediately visible.
-        self.load_current_plan();
+        // Reload workflow from disk so updated tasks are immediately visible.
+        self.load_current_workflow();
 
         Ok(())
     }
@@ -344,7 +344,7 @@ impl App {
         } else {
             Some(old_idx.map(|i| i.min(self.plans.len() - 1)).unwrap_or(0))
         };
-        self.load_current_plan();
+        self.load_current_workflow();
     }
 
     fn refresh_plans_and_focus(&mut self, name: &str) {
@@ -353,14 +353,14 @@ impl App {
         if self.selected_plan.is_none() && !self.plans.is_empty() {
             self.selected_plan = Some(0);
         }
-        self.load_current_plan();
+        self.load_current_workflow();
     }
 
-    fn load_current_plan(&mut self) {
-        self.current_plan = self.selected_plan.and_then(|i| {
+    fn load_current_workflow(&mut self) {
+        self.current_workflow = self.selected_plan.and_then(|i| {
             let name = self.plans.get(i)?;
             let dir = self.store.plan_dir(name);
-            Plan::load(&dir).ok()
+            Workflow::load(&dir).ok()
         });
     }
 
@@ -370,7 +370,7 @@ impl App {
         {
             self.selected_plan = Some(i - 1);
         }
-        self.load_current_plan();
+        self.load_current_workflow();
     }
 
     fn move_down(&mut self) {
@@ -379,7 +379,7 @@ impl App {
         {
             self.selected_plan = Some(i + 1);
         }
-        self.load_current_plan();
+        self.load_current_workflow();
     }
 
     fn check_status_timeout(&mut self) {
@@ -436,7 +436,7 @@ impl App {
         // Complete signal: transition to Complete state and reload plan.
         if complete {
             self.app_state = AppState::Complete;
-            self.load_current_plan();
+            self.load_current_workflow();
         }
 
         if done {
@@ -451,7 +451,7 @@ impl App {
                 }
             } else {
                 // Reload plan from disk — ralph may have updated passes: true.
-                self.load_current_plan();
+                self.load_current_workflow();
 
                 // If already Complete (via RunnerEvent::Complete), stay Complete.
                 // If app_state is Idle (manual stop via [s]), no overlay is shown.
@@ -459,9 +459,9 @@ impl App {
                     && let AppState::Running { iteration } = self.app_state
                 {
                     let is_complete = self
-                        .current_plan
+                        .current_workflow
                         .as_ref()
-                        .map(|p| p.is_complete())
+                        .map(|w| w.is_complete())
                         .unwrap_or(false);
                     if is_complete {
                         // Plan became complete after reload — no overlay needed.
@@ -477,7 +477,7 @@ impl App {
                     } else {
                         // Natural exit, plan not complete, within iteration limit.
                         // Show continue prompt so the user decides whether to proceed.
-                        let next = self.current_plan.as_ref().and_then(|p| p.next_task());
+                        let next = self.current_workflow.as_ref().and_then(|w| w.next_task());
                         let (next_id, next_title) = next
                             .map(|t| (t.id.clone(), t.title.clone()))
                             .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));

@@ -27,12 +27,12 @@ pub struct PrdJson {
 }
 
 #[derive(Debug, Clone)]
-pub struct Plan {
+pub struct Workflow {
     pub prd: PrdJson,
 }
 
-impl Plan {
-    /// Reads `prd.json` from `dir` and returns `Ok(Plan)`.
+impl Workflow {
+    /// Reads `prd.json` from `dir` and returns `Ok(Workflow)`.
     /// Returns `Err` if the file is missing or contains invalid JSON.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join("prd.json");
@@ -40,7 +40,7 @@ impl Plan {
             .with_context(|| format!("failed to read {}", path.display()))?;
         let prd: PrdJson = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
-        Ok(Plan { prd })
+        Ok(Workflow { prd })
     }
 
     /// Writes `self.prd` back to `prd.json` in `dir`.

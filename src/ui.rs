@@ -43,15 +43,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     // Tasks panel
-    match &app.current_plan {
+    match &app.current_workflow {
         None => {
             let block = Block::default().borders(Borders::ALL).title("Tasks");
             frame.render_widget(Paragraph::new("Select a plan").block(block), top[1]);
         }
-        Some(plan) => {
-            let title = format!("Tasks ({}/{})", plan.done_count(), plan.total_count());
+        Some(workflow) => {
+            let title = format!("Tasks ({}/{})", workflow.done_count(), workflow.total_count());
             let block = Block::default().borders(Borders::ALL).title(title);
-            let items: Vec<ListItem> = plan
+            let items: Vec<ListItem> = workflow
                 .prd
                 .tasks
                 .iter()
