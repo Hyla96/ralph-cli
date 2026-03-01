@@ -1,4 +1,4 @@
-use crate::app::{App, Dialog, RunnerTab, RunnerTabState};
+use crate::app::{App, Dialog, PrdEditorField, PrdEditorState, RunnerTab, RunnerTabState};
 use crate::ralph::workflow::Workflow;
 use ratatui::{
     Frame,
@@ -9,6 +9,12 @@ use ratatui::{
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    // Full-screen PRD metadata editor takes over the entire frame.
+    if let Some(editor) = &app.prd_editor {
+        draw_prd_editor(frame, editor, frame.area());
+        return;
+    }
+
     // Top-level split: tab bar (1 line) | content area (rest)
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -411,10 +417,89 @@ fn draw_help_dialog(frame: &mut Frame, area: Rect) {
         Line::from("  s         stop loop"),
         Line::from("  n         new workflow"),
         Line::from("  e         edit prd.json"),
+        Line::from("  E         open form editor"),
         Line::from("  d         delete workflow"),
         Line::from("  ?         help"),
         Line::from("  q         quit"),
     ];
     let block = Block::default().borders(Borders::ALL).title("Help");
     frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
+}
+
+/// Renders the full-screen PRD metadata editor (US-001).
+///
+/// Layout (inside the outer border):
+///   Project field     — 3 rows (bordered)
+///   Branch field      — 3 rows (bordered)
+///   Description field — 3 rows (bordered)
+///   spacer            — flexible
+///   hint / status     — 1 row
+///
+/// The focused field's border is highlighted in yellow; a `_` cursor is appended
+/// to its content. Ctrl+S saves; Esc discards.
+fn draw_prd_editor(frame: &mut Frame, editor: &PrdEditorState, area: Rect) {
+    let title = format!(" PRD Editor: {} ", editor.workflow_name);
+    let outer_block = Block::default().borders(Borders::ALL).title(title);
+    let inner_area = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Project
+            Constraint::Length(3), // Branch
+            Constraint::Length(3), // Description
+            Constraint::Min(0),    // spacer
+            Constraint::Length(1), // hint / status
+        ])
+        .split(inner_area);
+
+    let active_style = Style::default().fg(Color::Yellow);
+
+    // Project field
+    let focused = editor.focused_field == PrdEditorField::Project;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Project")
+        .border_style(if focused { active_style } else { Style::default() });
+    let text = if focused {
+        format!("{}_", editor.project)
+    } else {
+        editor.project.clone()
+    };
+    frame.render_widget(Paragraph::new(text).block(block), layout[0]);
+
+    // Branch field
+    let focused = editor.focused_field == PrdEditorField::Branch;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Branch")
+        .border_style(if focused { active_style } else { Style::default() });
+    let text = if focused {
+        format!("{}_", editor.branch)
+    } else {
+        editor.branch.clone()
+    };
+    frame.render_widget(Paragraph::new(text).block(block), layout[1]);
+
+    // Description field
+    let focused = editor.focused_field == PrdEditorField::Description;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Description")
+        .border_style(if focused { active_style } else { Style::default() });
+    let text = if focused {
+        format!("{}_", editor.description)
+    } else {
+        editor.description.clone()
+    };
+    frame.render_widget(Paragraph::new(text).block(block), layout[2]);
+
+    // Hint / status line: show save error in red, otherwise show keybinding hints.
+    let hint = if let Some(err) = &editor.status {
+        Line::from(Span::styled(err.as_str(), Style::default().fg(Color::Red)))
+    } else {
+        Line::from("[Tab] next field  [Shift+Tab] prev  [Ctrl+S] save  [Esc] cancel")
+    };
+    frame.render_widget(Paragraph::new(hint), layout[4]);
 }

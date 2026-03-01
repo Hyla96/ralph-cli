@@ -55,6 +55,27 @@ pub enum Dialog {
     DeleteWorkflow { name: String },
     ContinuePrompt { next_id: String, next_title: String },
     Help,
+    RunnerHelp,
+}
+
+/// Which field of the metadata form currently has focus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrdEditorField {
+    Project,
+    Branch,
+    Description,
+}
+
+/// In-memory state for the full-screen plan-metadata editor (US-001).
+pub struct PrdEditorState {
+    /// Name of the workflow being edited (used to resolve the directory).
+    pub workflow_name: String,
+    pub project: String,
+    pub branch: String,
+    pub description: String,
+    pub focused_field: PrdEditorField,
+    /// Transient error/status shown in the hint line; cleared on next keystroke.
+    pub status: Option<String>,
 }
 
 /// Spawns `claude --agent ralph` inside a PTY and streams output lines back via `tx`.
@@ -267,6 +288,9 @@ pub struct App {
     /// Transient notification set after a watcher-triggered reload.
     /// Tuple is (message_text, time_set). Cleared after 3 seconds.
     pub notification: Option<(String, Instant)>,
+    /// When `Some`, the full-screen PRD metadata editor is active.
+    /// All key input is routed to the editor; normal TUI is hidden.
+    pub prd_editor: Option<PrdEditorState>,
 }
 
 impl App {
@@ -302,6 +326,7 @@ impl App {
             watcher_rx: watcher_rx_opt,
             _watcher: watcher_opt,
             notification: None,
+            prd_editor: None,
         };
         app.load_current_workflow();
         app
@@ -360,7 +385,9 @@ impl App {
             }
             Event::Key(key) => {
                 #[allow(clippy::collapsible_else_if)]
-                if self.dialog.is_some() {
+                if self.prd_editor.is_some() {
+                    self.handle_prd_editor_key(key);
+                } else if self.dialog.is_some() {
                     self.handle_dialog_key(key.code);
                 } else if self.tab_nav_pending {
                     // Consume the chord: always clear the flag, then act.
@@ -380,6 +407,7 @@ impl App {
                     KeyCode::Char('s') => self.stop_runner(),
                     KeyCode::Char('n') => self.open_new_workflow_dialog(),
                     KeyCode::Char('e') => self.edit_current_plan(terminal)?,
+                    KeyCode::Char('E') => self.open_prd_editor(),
                     KeyCode::Char('d') => self.open_delete_workflow_dialog(),
                     KeyCode::Char('?') => self.open_help_dialog(),
                     _ => {}
@@ -544,8 +572,8 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, code: KeyCode) {
-        // Help overlay: any key closes it.
-        if matches!(self.dialog, Some(Dialog::Help)) {
+        // Help overlays: any key closes them.
+        if matches!(self.dialog, Some(Dialog::Help) | Some(Dialog::RunnerHelp)) {
             self.dialog = None;
             return;
         }
@@ -636,6 +664,122 @@ impl App {
 
     fn open_help_dialog(&mut self) {
         self.dialog = Some(Dialog::Help);
+    }
+
+    /// Opens the full-screen PRD metadata editor for the currently selected workflow.
+    /// Pre-populates all fields from the on-disk prd.json.
+    fn open_prd_editor(&mut self) {
+        let Some(idx) = self.selected_workflow else { return; };
+        let Some(name) = self.workflows.get(idx).cloned() else { return; };
+
+        let dir = self.store.workflow_dir(&name);
+        let workflow = match Workflow::load(&dir) {
+            Ok(w) => w,
+            Err(e) => {
+                self.status_message = Some(format!("Failed to load workflow: {e}"));
+                return;
+            }
+        };
+
+        self.prd_editor = Some(PrdEditorState {
+            workflow_name: name,
+            project: workflow.prd.project.clone(),
+            branch: workflow.prd.branch_name.clone(),
+            description: workflow.prd.description.clone(),
+            focused_field: PrdEditorField::Project,
+            status: None,
+        });
+    }
+
+    /// Writes the current editor state back to prd.json.
+    /// On success closes the editor; on error shows the message in the status line.
+    fn save_prd_editor(&mut self) {
+        // Clone the values we need before releasing the borrow.
+        let (name, project, branch, description) = match &self.prd_editor {
+            Some(e) => (
+                e.workflow_name.clone(),
+                e.project.clone(),
+                e.branch.clone(),
+                e.description.clone(),
+            ),
+            None => return,
+        };
+
+        let dir = self.store.workflow_dir(&name);
+        match Workflow::load(&dir) {
+            Ok(mut workflow) => {
+                workflow.prd.project = project;
+                workflow.prd.branch_name = branch;
+                workflow.prd.description = description;
+                match workflow.save(&dir) {
+                    Ok(()) => {
+                        self.prd_editor = None;
+                        self.load_current_workflow();
+                    }
+                    Err(e) => {
+                        if let Some(editor) = &mut self.prd_editor {
+                            editor.status = Some(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.status = Some(format!("Load failed: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Handles a key event while the PRD metadata editor is open.
+    fn handle_prd_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.prd_editor = None;
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_prd_editor();
+            }
+            KeyCode::Tab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.focused_field = match editor.focused_field {
+                        PrdEditorField::Project => PrdEditorField::Branch,
+                        PrdEditorField::Branch => PrdEditorField::Description,
+                        PrdEditorField::Description => PrdEditorField::Project,
+                    };
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.focused_field = match editor.focused_field {
+                        PrdEditorField::Project => PrdEditorField::Description,
+                        PrdEditorField::Branch => PrdEditorField::Project,
+                        PrdEditorField::Description => PrdEditorField::Branch,
+                    };
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => { editor.project.pop(); }
+                        PrdEditorField::Branch => { editor.branch.pop(); }
+                        PrdEditorField::Description => { editor.description.pop(); }
+                    }
+                    editor.status = None;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => editor.project.push(c),
+                        PrdEditorField::Branch => editor.branch.push(c),
+                        PrdEditorField::Description => editor.description.push(c),
+                    }
+                    editor.status = None;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn open_new_workflow_dialog(&mut self) {
