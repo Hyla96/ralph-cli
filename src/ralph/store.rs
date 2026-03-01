@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 
 pub struct Store {
@@ -79,7 +79,8 @@ impl Store {
         if !(3..=64).contains(&len) {
             return false;
         }
-        name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        name.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     }
 
     /// Returns the repo root path.

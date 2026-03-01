@@ -50,6 +50,8 @@ impl Watcher {
         use notify::Watcher as _;
         debouncer.watcher().watch(root, RecursiveMode::Recursive)?;
 
-        Ok(Watcher { _debouncer: debouncer })
+        Ok(Watcher {
+            _debouncer: debouncer,
+        })
     }
 }

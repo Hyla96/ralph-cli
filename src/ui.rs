@@ -39,11 +39,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Dialog::DeleteWorkflow { name }) => {
             draw_delete_workflow_dialog(frame, frame.area(), name);
         }
-        Some(Dialog::ContinuePrompt { next_id, next_title }) => {
+        Some(Dialog::ContinuePrompt {
+            next_id,
+            next_title,
+        }) => {
             draw_continue_prompt_dialog(frame, frame.area(), next_id, next_title);
         }
         Some(Dialog::Help) => {
             draw_help_dialog(frame, frame.area());
+        }
+        Some(Dialog::RunnerHelp) => {
+            draw_runner_help_dialog(frame, frame.area());
         }
         None => {}
     }
@@ -72,12 +78,14 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
     let plans_block = Block::default().borders(Borders::ALL).title(plans_title);
 
     if app.workflows.is_empty() {
-        let empty_msg =
-            Paragraph::new("No workflows. Press [n] to create one.").block(plans_block);
+        let empty_msg = Paragraph::new("No workflows. Press [n] to create one.").block(plans_block);
         frame.render_widget(empty_msg, top[0]);
     } else {
-        let items: Vec<ListItem> =
-            app.workflows.iter().map(|name| ListItem::new(name.as_str())).collect();
+        let items: Vec<ListItem> = app
+            .workflows
+            .iter()
+            .map(|name| ListItem::new(name.as_str()))
+            .collect();
         let list = List::new(items)
             .block(plans_block)
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -92,7 +100,11 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
             frame.render_widget(Paragraph::new("Select a workflow").block(block), top[1]);
         }
         Some(workflow) => {
-            let title = format!("Tasks ({}/{})", workflow.done_count(), workflow.total_count());
+            let title = format!(
+                "Tasks ({}/{})",
+                workflow.done_count(),
+                workflow.total_count()
+            );
             let block = Block::default().borders(Borders::ALL).title(title);
             let items: Vec<ListItem> = workflow
                 .prd
@@ -100,8 +112,7 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|task| {
                     let check = if task.passes { "✓" } else { "○" };
-                    let text =
-                        format!("{} [{}] {}: {}", check, task.priority, task.id, task.title);
+                    let text = format!("{} [{}] {}: {}", check, task.priority, task.id, task.title);
                     let style = if task.passes {
                         Style::default().fg(Color::DarkGray)
                     } else {
@@ -125,7 +136,10 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
     let status_text = if let Some(msg) = &app.status_message {
         let left = msg.as_str();
         let left_len = left.chars().count();
-        let mut spans = vec![Span::styled(left.to_string(), Style::default().fg(Color::Red))];
+        let mut spans = vec![Span::styled(
+            left.to_string(),
+            Style::default().fg(Color::Red),
+        )];
         if let Some(n) = notif {
             spans.extend(notification_right_spans(left_len, n, bar_width));
         }
@@ -166,8 +180,14 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     // so that PseudoTerminal renders the correct view (scrollback or live) without requiring
     // a mutable App reference in draw. When log_scroll == 0 the live screen is shown;
     // when log_scroll > 0 the screen is offset into the scrollback buffer.
-    let log_title = format!("Runner: {} — Up/k scroll up  End/G bottom", tab.workflow_name);
-    let log_block = Block::default().borders(Borders::ALL).title(log_title);
+    let log_title_text = match (&tab.current_task_id, &tab.current_task_title) {
+        (Some(id), Some(title)) => format!("{id}: {title}"),
+        _ => format!("Runner: {}", tab.workflow_name),
+    };
+    let log_block = Block::default().borders(Borders::ALL).title(Span::styled(
+        log_title_text,
+        Style::default().fg(CLAUDE_ORANGE),
+    ));
     {
         use tui_term::widget::PseudoTerminal;
         let pseudo_term = PseudoTerminal::new(tab.parser.screen()).block(log_block);
@@ -183,7 +203,10 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         // Transient status message overrides the left side.
         let left = msg.as_str();
         let left_len = left.chars().count();
-        let mut spans = vec![Span::styled(left.to_string(), Style::default().fg(Color::Red))];
+        let mut spans = vec![Span::styled(
+            left.to_string(),
+            Style::default().fg(Color::Red),
+        )];
         if let Some(ctx) = &task_ctx {
             spans.extend(notification_right_spans(left_len, ctx, bar_width));
         }
@@ -191,8 +214,12 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         match &tab.state {
             RunnerTabState::Running { .. } => {
-                let auto_label = if tab.auto_continue { "[a]uto:ON" } else { "[a]uto:OFF" };
-                let left = format!("[s]top  {auto_label}");
+                let auto_label = if tab.auto_continue {
+                    "[a]uto:ON"
+                } else {
+                    "[a]uto:OFF"
+                };
+                let left = format!("[s]top  {auto_label}  [?]help");
                 let left_len = left.chars().count();
                 let mut spans = vec![Span::raw(left)];
                 if let Some(ctx) = &task_ctx {
@@ -201,7 +228,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(spans)
             }
             RunnerTabState::Done => {
-                let left = "[x]close";
+                let left = "[x]close  [?]help";
                 let left_len = left.chars().count();
                 let mut spans = vec![Span::raw(left)];
                 if let Some(ctx) = &task_ctx {
@@ -211,45 +238,59 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
             }
             RunnerTabState::Error(_) => {
                 // Error message lives in the terminal output; status bar shows keybindings only.
-                Line::from(Span::styled("[x]close  [q]uit", Style::default().fg(Color::Red)))
+                Line::from(Span::styled(
+                    "[x]close  [q]uit  [?]help",
+                    Style::default().fg(Color::Red),
+                ))
             }
         }
     };
     frame.render_widget(Paragraph::new(status_text), layout[1]);
-
 }
+
+// Claude brand orange (#DA7756).
+const CLAUDE_ORANGE: Color = Color::Rgb(218, 119, 86);
 
 /// Renders the single-line tab bar at the top of the screen.
 ///
 /// Tabs are space-padded and separated by `│`. The active tab is REVERSED+BOLD;
-/// inactive tabs are dimmed. Any remaining width is filled to extend the bar.
+/// inactive tabs are dimmed. Runner tabs use the Claude brand orange.
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
-    // Build the full list of (label, is_active) entries up front.
-    let mut entries: Vec<(String, bool)> = Vec::new();
+    // Build the full list of (label, is_active, is_runner) entries up front.
+    let mut entries: Vec<(String, bool, bool)> = Vec::new();
 
-    entries.push((" Workflows ".to_string(), app.active_tab == 0));
+    entries.push((" Workflows ".to_string(), app.active_tab == 0, false));
 
     for (i, tab) in app.runner_tabs.iter().enumerate() {
         let suffix = match &tab.state {
             RunnerTabState::Running { .. } => "",
-            RunnerTabState::Done => " \u{2713}",  // ✓
+            RunnerTabState::Done => " \u{2713}", // ✓
             RunnerTabState::Error(_) => " !",
         };
         entries.push((
             format!(" {}{} ", tab.workflow_name, suffix),
             app.active_tab == i + 1,
+            true,
         ));
     }
 
     let sep_style = Style::default().fg(Color::DarkGray);
     let inactive_style = Style::default().fg(Color::DarkGray);
-    let active_style =
-        Style::default().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD);
+    let active_style = Style::default()
+        .add_modifier(Modifier::REVERSED)
+        .add_modifier(Modifier::BOLD);
+    let runner_inactive_style = Style::default()
+        .fg(CLAUDE_ORANGE)
+        .add_modifier(Modifier::DIM);
+    let runner_active_style = Style::default()
+        .fg(CLAUDE_ORANGE)
+        .add_modifier(Modifier::REVERSED)
+        .add_modifier(Modifier::BOLD);
 
     let mut spans: Vec<Span> = Vec::new();
     let mut used_width: u16 = 0;
 
-    for (idx, (label, is_active)) in entries.iter().enumerate() {
+    for (idx, (label, is_active, is_runner)) in entries.iter().enumerate() {
         // Separator between tabs (not before the first one).
         if idx > 0 {
             if used_width + 1 > area.width {
@@ -264,7 +305,12 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             break;
         }
 
-        let style = if *is_active { active_style } else { inactive_style };
+        let style = match (is_active, is_runner) {
+            (true, true) => runner_active_style,
+            (false, true) => runner_inactive_style,
+            (true, false) => active_style,
+            (false, false) => inactive_style,
+        };
         spans.push(Span::styled(label.as_str(), style));
         used_width += label_w;
     }
@@ -366,16 +412,13 @@ fn draw_delete_workflow_dialog(frame: &mut Frame, area: Rect, name: &str) {
     frame.render_widget(Clear, dialog_rect);
 
     let text = format!("Delete workflow '{name}'? [y/N]");
-    let block = Block::default().borders(Borders::ALL).title("Delete Workflow");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Delete Workflow");
     frame.render_widget(Paragraph::new(text).block(block), dialog_rect);
 }
 
-fn draw_continue_prompt_dialog(
-    frame: &mut Frame,
-    area: Rect,
-    next_id: &str,
-    next_title: &str,
-) {
+fn draw_continue_prompt_dialog(frame: &mut Frame, area: Rect, next_id: &str, next_title: &str) {
     // 70 wide (2 border + 68 content), 4 tall (2 border + 2 content lines)
     let dialog_rect = centered_rect(70, 4, area);
     frame.render_widget(Clear, dialog_rect);
@@ -426,6 +469,26 @@ fn draw_help_dialog(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
 }
 
+fn draw_runner_help_dialog(frame: &mut Frame, area: Rect) {
+    // 46 wide (2 border + 44 content), 11 tall (2 border + 9 keybinding rows)
+    let dialog_rect = centered_rect(46, 11, area);
+    frame.render_widget(Clear, dialog_rect);
+
+    let lines = vec![
+        Line::from("  s         stop loop"),
+        Line::from("  a         toggle auto-continue"),
+        Line::from("  \u{2191}/k       scroll up"),
+        Line::from("  \u{2193}/j       scroll down"),
+        Line::from("  End/G     jump to bottom"),
+        Line::from("  x         close tab"),
+        Line::from("  t+1..9    switch tab"),
+        Line::from("  ?         this help"),
+        Line::from("  q         quit"),
+    ];
+    let block = Block::default().borders(Borders::ALL).title("Runner Help");
+    frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
+}
+
 /// Renders the full-screen PRD metadata editor (US-001).
 ///
 /// Layout (inside the outer border):
@@ -461,7 +524,11 @@ fn draw_prd_editor(frame: &mut Frame, editor: &PrdEditorState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Project")
-        .border_style(if focused { active_style } else { Style::default() });
+        .border_style(if focused {
+            active_style
+        } else {
+            Style::default()
+        });
     let text = if focused {
         format!("{}_", editor.project)
     } else {
@@ -474,7 +541,11 @@ fn draw_prd_editor(frame: &mut Frame, editor: &PrdEditorState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Branch")
-        .border_style(if focused { active_style } else { Style::default() });
+        .border_style(if focused {
+            active_style
+        } else {
+            Style::default()
+        });
     let text = if focused {
         format!("{}_", editor.branch)
     } else {
@@ -487,7 +558,11 @@ fn draw_prd_editor(frame: &mut Frame, editor: &PrdEditorState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Description")
-        .border_style(if focused { active_style } else { Style::default() });
+        .border_style(if focused {
+            active_style
+        } else {
+            Style::default()
+        });
     let text = if focused {
         format!("{}_", editor.description)
     } else {

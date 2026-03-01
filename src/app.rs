@@ -51,9 +51,17 @@ pub struct RunnerTab {
 }
 
 pub enum Dialog {
-    NewWorkflow { input: String, error: Option<String> },
-    DeleteWorkflow { name: String },
-    ContinuePrompt { next_id: String, next_title: String },
+    NewWorkflow {
+        input: String,
+        error: Option<String>,
+    },
+    DeleteWorkflow {
+        name: String,
+    },
+    ContinuePrompt {
+        next_id: String,
+        next_title: String,
+    },
     Help,
     RunnerHelp,
 }
@@ -104,7 +112,12 @@ async fn runner_task(
 
     let (cols, rows) = size;
     let pty_system = native_pty_system();
-    let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+    let pair = match pty_system.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(RunnerEvent::SpawnError(format!("PTY open failed: {e}")));
@@ -201,14 +214,22 @@ async fn runner_task(
         use portable_pty::PtySize;
         let mut resize_rx = resize_rx;
         while let Some((cols, rows)) = resize_rx.recv().await {
-            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
     }));
 
     // Wait for the child to exit in a blocking task; send the exit code via oneshot.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<u32>();
     tokio::task::spawn_blocking(move || {
-        let code = child.wait().map(|s| if s.success() { 0u32 } else { 1u32 }).unwrap_or(1u32);
+        let code = child
+            .wait()
+            .map(|s| if s.success() { 0u32 } else { 1u32 })
+            .unwrap_or(1u32);
         let _ = done_tx.send(code);
     });
 
@@ -303,11 +324,11 @@ impl App {
 
         // Start OS-native file watcher. Gracefully degrade if it fails.
         let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel::<WatcherEvent>(64);
-        let (watcher_opt, watcher_rx_opt, watcher_warning) =
-            match Watcher::start(&root, watcher_tx) {
-                Ok(w) => (Some(w), Some(watcher_rx), None),
-                Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
-            };
+        let (watcher_opt, watcher_rx_opt, watcher_warning) = match Watcher::start(&root, watcher_tx)
+        {
+            Ok(w) => (Some(w), Some(watcher_rx), None),
+            Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
+        };
 
         let mut app = App {
             running: true,
@@ -342,12 +363,12 @@ impl App {
                 self.reload_all();
                 if let Some(path) = first_path {
                     let root = self.store.root().to_path_buf();
-                    let rel =
-                        path.strip_prefix(&root).map(|p| p.to_path_buf()).unwrap_or(path);
-                    self.notification = Some((
-                        format!("↻ {} reloaded", rel.display()),
-                        Instant::now(),
-                    ));
+                    let rel = path
+                        .strip_prefix(&root)
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or(path);
+                    self.notification =
+                        Some((format!("↻ {} reloaded", rel.display()), Instant::now()));
                 }
             }
             if let Err(e) = terminal.draw(|frame| crate::ui::draw(frame, self)) {
@@ -394,113 +415,113 @@ impl App {
                     self.tab_nav_pending = false;
                     self.handle_tab_nav_key(key.code);
                 } else if self.active_tab == 0 {
-                // Workflows tab keybindings.
-                match key.code {
-                    KeyCode::Char('t') => self.tab_nav_pending = true,
-                    KeyCode::Char('q') => self.running = false,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.running = false;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-                    KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-                    KeyCode::Char('r') => self.start_runner(),
-                    KeyCode::Char('s') => self.stop_runner(),
-                    KeyCode::Char('n') => self.open_new_workflow_dialog(),
-                    KeyCode::Char('e') => self.edit_current_plan(terminal)?,
-                    KeyCode::Char('E') => self.open_prd_editor(),
-                    KeyCode::Char('d') => self.open_delete_workflow_dialog(),
-                    KeyCode::Char('?') => self.open_help_dialog(),
-                    _ => {}
-                }
-            } else {
-                // Runner tab keybindings.
-                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, k/Up, j/Down, G/End.
-                // All other keys are forwarded as raw bytes via key_to_pty_bytes.
-                match key.code {
-                    KeyCode::Char('t') => self.tab_nav_pending = true,
-                    KeyCode::Char('q') => self.running = false,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.running = false;
-                    }
-                    KeyCode::Char('s') => self.stop_runner(),
-                    KeyCode::Char('a') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.auto_continue = !tab.auto_continue;
-                            let msg = if tab.auto_continue {
-                                "Auto-continue ON".to_string()
-                            } else {
-                                "Auto-continue OFF".to_string()
-                            };
-                            self.status_message = Some(msg);
-                            self.status_message_expires =
-                                Some(Instant::now() + Duration::from_secs(2));
+                    // Workflows tab keybindings.
+                    match key.code {
+                        KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Char('q') => self.running = false,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.running = false;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => self.move_up(),
+                        KeyCode::Down | KeyCode::Char('j') => self.move_down(),
+                        KeyCode::Char('r') => self.start_runner(),
+                        KeyCode::Char('s') => self.stop_runner(),
+                        KeyCode::Char('n') => self.open_new_workflow_dialog(),
+                        KeyCode::Char('e') => self.edit_current_plan(terminal)?,
+                        KeyCode::Char('E') => self.open_prd_editor(),
+                        KeyCode::Char('d') => self.open_delete_workflow_dialog(),
+                        KeyCode::Char('?') => self.open_help_dialog(),
+                        _ => {}
                     }
-                    // Close a Done/Error runner tab; refuse if still Running.
-                    KeyCode::Char('x') => {
-                        let tab_idx = self.active_tab - 1;
-                        let is_running = self
-                            .runner_tabs
-                            .get(tab_idx)
-                            .map(|t| matches!(t.state, RunnerTabState::Running { .. }))
-                            .unwrap_or(false);
-                        if is_running {
-                            self.status_message =
-                                Some("Stop the runner first [s]".to_string());
-                            self.status_message_expires =
-                                Some(Instant::now() + Duration::from_secs(2));
-                        } else if self.runner_tabs.get(tab_idx).is_some() {
-                            self.runner_tabs.remove(tab_idx);
-                            // Move to the previous tab; saturating_sub(1) gives 0 (Workflows)
-                            // when active_tab was 1 (the only runner tab).
-                            self.active_tab = self.active_tab.saturating_sub(1);
+                } else {
+                    // Runner tab keybindings.
+                    // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, ?, k/Up, j/Down, G/End.
+                    // All other keys are forwarded as raw bytes via key_to_pty_bytes.
+                    match key.code {
+                        KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Char('q') => self.running = false,
+                        KeyCode::Char('?') => self.dialog = Some(Dialog::RunnerHelp),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.running = false;
                         }
-                    }
-                    // Log scroll: Up/k scroll up (into scrollback), Down/j scroll down.
-                    // log_scroll == 0 means auto-scroll (live vt100 screen).
-                    // log_scroll == N means N rows of scrollback are shown above the screen.
-                    // The scrollback position is kept in sync on the vt100 parser's screen so
-                    // that PseudoTerminal renders the correct view without needing &mut in draw.
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            // Cap at the configured scrollback size (1000 rows).
-                            tab.log_scroll = (tab.log_scroll + 1).min(1000);
-                            tab.parser.screen_mut().set_scrollback(tab.log_scroll);
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.log_scroll = tab.log_scroll.saturating_sub(1);
-                            tab.parser.screen_mut().set_scrollback(tab.log_scroll);
-                        }
-                    }
-                    // End or G re-enables auto-scroll (live screen, scrollback = 0).
-                    KeyCode::End | KeyCode::Char('G') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.log_scroll = 0;
-                            tab.parser.screen_mut().set_scrollback(0);
-                        }
-                    }
-                    // All other keys are forwarded directly to the PTY as raw bytes.
-                    _ => {
-                        if let Some(bytes) = key_to_pty_bytes(key) {
+                        KeyCode::Char('s') => self.stop_runner(),
+                        KeyCode::Char('a') => {
                             let tab_idx = self.active_tab - 1;
-                            if let Some(tab) = self.runner_tabs.get(tab_idx)
-                                && let Some(tx) = &tab.stdin_tx
-                            {
-                                let _ = tx.send(bytes);
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.auto_continue = !tab.auto_continue;
+                                let msg = if tab.auto_continue {
+                                    "Auto-continue ON".to_string()
+                                } else {
+                                    "Auto-continue OFF".to_string()
+                                };
+                                self.status_message = Some(msg);
+                                self.status_message_expires =
+                                    Some(Instant::now() + Duration::from_secs(2));
+                            }
+                        }
+                        // Close a Done/Error runner tab; refuse if still Running.
+                        KeyCode::Char('x') => {
+                            let tab_idx = self.active_tab - 1;
+                            let is_running = self
+                                .runner_tabs
+                                .get(tab_idx)
+                                .map(|t| matches!(t.state, RunnerTabState::Running { .. }))
+                                .unwrap_or(false);
+                            if is_running {
+                                self.status_message = Some("Stop the runner first [s]".to_string());
+                                self.status_message_expires =
+                                    Some(Instant::now() + Duration::from_secs(2));
+                            } else if self.runner_tabs.get(tab_idx).is_some() {
+                                self.runner_tabs.remove(tab_idx);
+                                // Move to the previous tab; saturating_sub(1) gives 0 (Workflows)
+                                // when active_tab was 1 (the only runner tab).
+                                self.active_tab = self.active_tab.saturating_sub(1);
+                            }
+                        }
+                        // Log scroll: Up/k scroll up (into scrollback), Down/j scroll down.
+                        // log_scroll == 0 means auto-scroll (live vt100 screen).
+                        // log_scroll == N means N rows of scrollback are shown above the screen.
+                        // The scrollback position is kept in sync on the vt100 parser's screen so
+                        // that PseudoTerminal renders the correct view without needing &mut in draw.
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                // Cap at the configured scrollback size (1000 rows).
+                                tab.log_scroll = (tab.log_scroll + 1).min(1000);
+                                tab.parser.screen_mut().set_scrollback(tab.log_scroll);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.log_scroll = tab.log_scroll.saturating_sub(1);
+                                tab.parser.screen_mut().set_scrollback(tab.log_scroll);
+                            }
+                        }
+                        // End or G re-enables auto-scroll (live screen, scrollback = 0).
+                        KeyCode::End | KeyCode::Char('G') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.log_scroll = 0;
+                                tab.parser.screen_mut().set_scrollback(0);
+                            }
+                        }
+                        // All other keys are forwarded directly to the PTY as raw bytes.
+                        _ => {
+                            if let Some(bytes) = key_to_pty_bytes(key) {
+                                let tab_idx = self.active_tab - 1;
+                                if let Some(tab) = self.runner_tabs.get(tab_idx)
+                                    && let Some(tx) = &tab.stdin_tx
+                                {
+                                    let _ = tx.send(bytes);
+                                }
                             }
                         }
                     }
-                }
-            }   // closes else { block
-            }   // closes Event::Key(key) => { arm body
+                } // closes else { block
+            } // closes Event::Key(key) => { arm body
             _ => {} // other events (mouse, focus, paste, …) are ignored
-        }       // closes match event::read()?
+        } // closes match event::read()?
         Ok(())
     }
 
@@ -669,8 +690,12 @@ impl App {
     /// Opens the full-screen PRD metadata editor for the currently selected workflow.
     /// Pre-populates all fields from the on-disk prd.json.
     fn open_prd_editor(&mut self) {
-        let Some(idx) = self.selected_workflow else { return; };
-        let Some(name) = self.workflows.get(idx).cloned() else { return; };
+        let Some(idx) = self.selected_workflow else {
+            return;
+        };
+        let Some(name) = self.workflows.get(idx).cloned() else {
+            return;
+        };
 
         let dir = self.store.workflow_dir(&name);
         let workflow = match Workflow::load(&dir) {
@@ -761,9 +786,15 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(editor) = &mut self.prd_editor {
                     match editor.focused_field {
-                        PrdEditorField::Project => { editor.project.pop(); }
-                        PrdEditorField::Branch => { editor.branch.pop(); }
-                        PrdEditorField::Description => { editor.description.pop(); }
+                        PrdEditorField::Project => {
+                            editor.project.pop();
+                        }
+                        PrdEditorField::Branch => {
+                            editor.branch.pop();
+                        }
+                        PrdEditorField::Description => {
+                            editor.description.pop();
+                        }
                     }
                     editor.status = None;
                 }
@@ -804,7 +835,11 @@ impl App {
         self.selected_workflow = if self.workflows.is_empty() {
             None
         } else {
-            Some(old_idx.map(|i| i.min(self.workflows.len() - 1)).unwrap_or(0))
+            Some(
+                old_idx
+                    .map(|i| i.min(self.workflows.len() - 1))
+                    .unwrap_or(0),
+            )
         };
         self.load_current_workflow();
     }
@@ -881,18 +916,25 @@ impl App {
     /// Does not interrupt active runner subprocesses.
     pub fn reload_all(&mut self) {
         // Remember the currently selected workflow name to restore after the list refresh.
-        let old_name = self.selected_workflow.and_then(|i| self.workflows.get(i).cloned());
+        let old_name = self
+            .selected_workflow
+            .and_then(|i| self.workflows.get(i).cloned());
 
         // Refresh the workflow list from disk.
         self.workflows = self.store.list_workflows();
 
         // Restore selection: prefer the same workflow by name; fall back to first, or None.
         self.selected_workflow = match &old_name {
-            Some(name) => self
-                .workflows
-                .iter()
-                .position(|p| p == name)
-                .or(if self.workflows.is_empty() { None } else { Some(0) }),
+            Some(name) => {
+                self.workflows
+                    .iter()
+                    .position(|p| p == name)
+                    .or(if self.workflows.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    })
+            }
             None => {
                 if self.workflows.is_empty() {
                     None
@@ -921,7 +963,12 @@ impl App {
                     let dir = self.store.workflow_dir(name);
                     Workflow::load(&dir)
                         .ok()
-                        .map(|w| w.prd.tasks.iter().any(|t| t.id == next_id_clone && !t.passes))
+                        .map(|w| {
+                            w.prd
+                                .tasks
+                                .iter()
+                                .any(|t| t.id == next_id_clone && !t.passes)
+                        })
                         .unwrap_or(false)
                 })
                 .unwrap_or(false);
@@ -1009,8 +1056,10 @@ impl App {
                 let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
                 let workflow_dir = self.store.workflow_dir(&workflow_name);
                 let tab_workflow = Workflow::load(&workflow_dir).ok();
-                let is_complete =
-                    tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                let is_complete = tab_workflow
+                    .as_ref()
+                    .map(|w| w.is_complete())
+                    .unwrap_or(false);
                 if is_complete {
                     self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                 } else {
@@ -1067,16 +1116,17 @@ impl App {
                     let workflow_dir = self.store.workflow_dir(&workflow_name);
                     let tab_workflow = Workflow::load(&workflow_dir).ok();
 
-                    let is_complete =
-                        tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                    let is_complete = tab_workflow
+                        .as_ref()
+                        .map(|w| w.is_complete())
+                        .unwrap_or(false);
 
                     let auto_continue = self.runner_tabs[tab_idx].auto_continue;
 
                     if auto_continue {
                         // Sentinel (complete) takes precedence: treat as success regardless of
                         // exit code. Without sentinel, exit code 0 is success.
-                        let is_success =
-                            complete || matches!(exited_code, Some(Some(0)));
+                        let is_success = complete || matches!(exited_code, Some(Some(0)));
 
                         if is_complete {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
@@ -1091,8 +1141,10 @@ impl App {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                         } else {
                             // Failure within limit: write retry log and spawn next.
-                            let exit_code =
-                                match exited_code { Some(Some(c)) => c, _ => 1u32 };
+                            let exit_code = match exited_code {
+                                Some(Some(c)) => c,
+                                _ => 1u32,
+                            };
                             let msg = format!(
                                 "\r\n[runner] Task failed (exit {exit_code}), retrying\u{2026} ({iteration}/{MAX_ITERATIONS})\r\n"
                             );
@@ -1155,9 +1207,11 @@ impl App {
         };
 
         // Prevent starting a second runner for the same workflow while one is active.
-        if self.runner_tabs.iter().any(|t| {
-            t.workflow_name == name && matches!(t.state, RunnerTabState::Running { .. })
-        }) {
+        if self
+            .runner_tabs
+            .iter()
+            .any(|t| t.workflow_name == name && matches!(t.state, RunnerTabState::Running { .. }))
+        {
             self.status_message = Some("Already running".to_string());
             self.status_message_expires = Some(Instant::now() + Duration::from_secs(2));
             return;
@@ -1169,9 +1223,10 @@ impl App {
         // Load workflow to populate current task info before spawning.
         let (current_task_id, current_task_title) = {
             let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir).ok().and_then(|w| {
-                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
-            }) {
+            match Workflow::load(&workflow_dir)
+                .ok()
+                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            {
                 Some((id, title)) => (Some(id), Some(title)),
                 None => (None, None),
             }
@@ -1184,8 +1239,7 @@ impl App {
 
         // Reuse an existing Done/Error tab for this workflow rather than accumulating tabs.
         let reuse_idx = self.runner_tabs.iter().position(|t| {
-            t.workflow_name == name
-                && !matches!(t.state, RunnerTabState::Running { .. })
+            t.workflow_name == name && !matches!(t.state, RunnerTabState::Running { .. })
         });
 
         let (cols, rows) = self.initial_size;
@@ -1223,7 +1277,13 @@ impl App {
 
         self.resize_txs.push(resize_tx);
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
+            plan_dir,
+            repo_root,
+            tx,
+            kill_rx,
+            stdin_rx,
+            self.initial_size,
+            resize_rx,
         )));
     }
 
@@ -1258,9 +1318,10 @@ impl App {
         // Load workflow to update current task info before spawning.
         let (current_task_id, current_task_title) = {
             let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir).ok().and_then(|w| {
-                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
-            }) {
+            match Workflow::load(&workflow_dir)
+                .ok()
+                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            {
                 Some((id, title)) => (Some(id), Some(title)),
                 None => (None, None),
             }
@@ -1277,7 +1338,9 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
-            tab.state = RunnerTabState::Running { iteration: new_iteration };
+            tab.state = RunnerTabState::Running {
+                iteration: new_iteration,
+            };
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = new_iteration;
@@ -1285,7 +1348,13 @@ impl App {
 
         self.resize_txs.push(resize_tx);
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
+            plan_dir,
+            repo_root,
+            tx,
+            kill_rx,
+            stdin_rx,
+            self.initial_size,
+            resize_rx,
         )));
     }
 }
