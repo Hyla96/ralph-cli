@@ -104,14 +104,7 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
             frame.render_widget(Paragraph::new("Select a workflow").block(block), top[1]);
         }
         Some(workflow) => {
-            let title = format!(
-                "Tasks ({}/{})",
-                workflow.done_count(),
-                workflow.total_count()
-            );
-            let block = Block::default().borders(Borders::ALL).title(title);
-
-            // Load usage file once for per-task token display.
+            // Load usage file once for per-task token display and title aggregate.
             let usage_file = app
                 .selected_workflow
                 .and_then(|i| app.workflows.get(i))
@@ -120,6 +113,24 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
                     UsageFile::load(&dir).unwrap_or_default()
                 })
                 .unwrap_or_default();
+
+            let total_tokens =
+                usage_file.total.input_tokens + usage_file.total.output_tokens;
+            let title = if total_tokens > 0 {
+                format!(
+                    "Tasks ({}/{})  {}",
+                    workflow.done_count(),
+                    workflow.total_count(),
+                    format_tokens(total_tokens)
+                )
+            } else {
+                format!(
+                    "Tasks ({}/{})",
+                    workflow.done_count(),
+                    workflow.total_count()
+                )
+            };
+            let block = Block::default().borders(Borders::ALL).title(title);
 
             let items: Vec<ListItem> = workflow
                 .prd
