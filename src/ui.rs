@@ -227,7 +227,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         match &tab.state {
             RunnerTabState::Running { .. } => {
                 let auto_label = if tab.auto_continue { "[a]uto:ON" } else { "[a]uto:OFF" };
-                let left = format!("[Ctrl+S]stop  {auto_label}  [?]help");
+                let left = format!("[i]nsert  [s]stop  {auto_label}  [?]help  [q]uit");
                 let left_len = left.chars().count();
                 let mut spans = vec![Span::raw(left)];
                 if let Some(ctx) = &task_ctx {
