@@ -818,8 +818,18 @@ impl App {
                 workflow.prd.tasks = stories;
                 match workflow.save(&dir) {
                     Ok(()) => {
-                        self.prd_editor = None;
-                        self.load_current_workflow();
+                        // Verify the saved file is valid JSON and can be deserialized.
+                        match Workflow::load(&dir) {
+                            Ok(_) => {
+                                self.prd_editor = None;
+                                self.load_current_workflow();
+                            }
+                            Err(e) => {
+                                if let Some(editor) = &mut self.prd_editor {
+                                    editor.status = Some(format!("Save verification failed: {e}"));
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         if let Some(editor) = &mut self.prd_editor {
@@ -1263,7 +1273,17 @@ impl App {
                 workflow.prd.tasks = updated_stories;
                 match workflow.save(&dir) {
                     Ok(()) => {
-                        self.load_current_workflow();
+                        // Verify the saved file is valid JSON and can be deserialized.
+                        match Workflow::load(&dir) {
+                            Ok(_) => {
+                                self.load_current_workflow();
+                            }
+                            Err(e) => {
+                                if let Some(editor) = &mut self.prd_editor {
+                                    editor.status = Some(format!("Save verification failed: {e}"));
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         if let Some(editor) = &mut self.prd_editor {
