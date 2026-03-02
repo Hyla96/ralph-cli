@@ -198,12 +198,20 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(pseudo_term, layout[0]);
     }
 
-    // Status line: transient messages take left side; task context on right.
-    // Running/Done states: left = keybindings + auto toggle, right = task context.
-    // Error state: left = keybindings (red), no right side.
+    // Status line: insert_mode takes priority; then transient messages; then state-based hints.
+    // Insert mode: left = INSERT indicator (green), no task context.
+    // Normal mode Running/Done: left = keybindings + auto toggle + [?]help, right = task context.
+    // Normal mode Error: left = keybindings (red) + [?]help, no right side.
     let bar_width = layout[1].width;
     let task_ctx = runner_tab_context(app, tab);
-    let status_text = if let Some(msg) = &app.status_message {
+    let insert_mode = tab.insert_mode;
+    let status_text = if insert_mode {
+        // INSERT mode indicator: show mode, suppress task context.
+        Line::from(Span::styled(
+            "-- INSERT --  [Esc] normal mode",
+            Style::default().fg(Color::Green),
+        ))
+    } else if let Some(msg) = &app.status_message {
         // Transient status message overrides the left side.
         let left = msg.as_str();
         let left_len = left.chars().count();
@@ -219,7 +227,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         match &tab.state {
             RunnerTabState::Running { .. } => {
                 let auto_label = if tab.auto_continue { "[a]uto:ON" } else { "[a]uto:OFF" };
-                let left = format!("[s]top  {auto_label}");
+                let left = format!("[i]nsert  [s]stop  {auto_label}  [?]help  [q]uit");
                 let left_len = left.chars().count();
                 let mut spans = vec![Span::raw(left)];
                 if let Some(ctx) = &task_ctx {
@@ -228,7 +236,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(spans)
             }
             RunnerTabState::Done => {
-                let left = "[x]close";
+                let left = "[x]close  [?]help";
                 let left_len = left.chars().count();
                 let mut spans = vec![Span::raw(left)];
                 if let Some(ctx) = &task_ctx {
@@ -238,7 +246,10 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
             }
             RunnerTabState::Error(_) => {
                 // Error message lives in the terminal output; status bar shows keybindings only.
-                Line::from(Span::styled("[x]close  [q]uit", Style::default().fg(Color::Red)))
+                Line::from(Span::styled(
+                    "[x]close  [q]quit  [?]help",
+                    Style::default().fg(Color::Red),
+                ))
             }
         }
     };
@@ -256,7 +267,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Build the full list of (label, is_active, is_runner) entries up front.
     let mut entries: Vec<(String, bool, bool)> = Vec::new();
 
-    entries.push((" Workflows ".to_string(), app.active_tab == 0, false));
+    entries.push((" [1] Workflows ".to_string(), app.active_tab == 0, false));
 
     for (i, tab) in app.runner_tabs.iter().enumerate() {
         let suffix = match &tab.state {
@@ -265,7 +276,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             RunnerTabState::Error(_) => " !",
         };
         entries.push((
-            format!(" {}{} ", tab.workflow_name, suffix),
+            format!(" [{}] {}{} ", i + 2, tab.workflow_name, suffix),
             app.active_tab == i + 1,
             true,
         ));
@@ -476,20 +487,29 @@ fn draw_help_dialog(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_runner_help_dialog(frame: &mut Frame, area: Rect) {
-    // 46 wide (2 border + 44 content), 11 tall (2 border + 9 keybinding rows)
-    let dialog_rect = centered_rect(46, 11, area);
+    // 52 wide (2 border + 50 content), 19 tall (2 border + 17 content rows)
+    let dialog_rect = centered_rect(52, 19, area);
     frame.render_widget(Clear, dialog_rect);
 
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
     let lines = vec![
-        Line::from("  s         stop loop"),
-        Line::from("  a         toggle auto-continue"),
-        Line::from("  \u{2191}/k       scroll up"),
-        Line::from("  \u{2193}/j       scroll down"),
-        Line::from("  End/G     jump to bottom"),
-        Line::from("  x         close tab"),
-        Line::from("  t+1..9    switch tab"),
-        Line::from("  ?         this help"),
-        Line::from("  q         quit"),
+        Line::from(Span::styled("  -- Normal mode --", header_style)),
+        Line::from("  i           enter insert mode"),
+        Line::from("  Ctrl+S      stop loop"),
+        Line::from("  a           toggle auto-continue"),
+        Line::from("  \u{2191}/k         scroll up"),
+        Line::from("  \u{2193}/j         scroll down"),
+        Line::from("  End/G       jump to bottom"),
+        Line::from("  Tab         next tab"),
+        Line::from("  Shift+Tab   prev tab"),
+        Line::from("  t+1..9      switch tab by number"),
+        Line::from("  x           close tab"),
+        Line::from("  ?           this help"),
+        Line::from("  q           quit"),
+        Line::from(""),
+        Line::from(Span::styled("  -- Insert mode --", header_style)),
+        Line::from("  Esc         back to normal mode"),
+        Line::from("  Ctrl+C      send interrupt to PTY"),
     ];
     let block = Block::default().borders(Borders::ALL).title("Runner Help");
     frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
