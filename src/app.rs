@@ -245,10 +245,15 @@ async fn runner_task(
     // Read PTY output in a blocking thread: send raw 4096-byte chunks as Bytes events.
     // <promise>COMPLETE</promise> is detected by scanning the chunk as lossy UTF-8.
     let tx_read = tx.clone();
+    let debug_pty = std::env::var("RALPH_DEBUG_PTY").is_ok();
+    let debug_log_path = repo_root.join(".ralph").join("pty-debug.log");
     let read_handle = tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let mut buf = [0u8; 4096];
         let mut reader = reader;
+        // Tail buffer: last ~512 bytes of the previous chunk, prepended to the current
+        // chunk before scanning for token lines. Prevents missing lines split across chunks.
+        let mut tail: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -256,12 +261,35 @@ async fn runner_task(
                     let chunk = &buf[..n];
                     let chunk_str = String::from_utf8_lossy(chunk);
 
+                    // When RALPH_DEBUG_PTY=1, append ANSI-stripped text to .ralph/pty-debug.log
+                    // so the actual Claude CLI output format can be inspected.
+                    // The raw bytes are forwarded unchanged; only the stripped copy is logged.
+                    if debug_pty {
+                        use std::io::Write;
+                        let stripped = strip_ansi(&chunk_str);
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&debug_log_path)
+                        {
+                            let _ = write!(f, "{stripped}");
+                            let _ = writeln!(f, "\n---");
+                        }
+                    }
+
                     if chunk_str.contains("<promise>COMPLETE</promise>") {
                         let _ = tx_read.send(RunnerEvent::Complete);
                     }
 
-                    // Scan for cost line: Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)
-                    if let Some(usage) = parse_cost_line(&chunk_str) {
+                    // Build combined string (tail + chunk) to handle lines split across
+                    // consecutive 4096-byte PTY chunks. Strip ANSI before parsing.
+                    let mut combined = Vec::with_capacity(tail.len() + n);
+                    combined.extend_from_slice(&tail);
+                    combined.extend_from_slice(chunk);
+                    let combined_lossy = String::from_utf8_lossy(&combined);
+                    let stripped_combined = strip_ansi(&combined_lossy);
+
+                    if let Some(usage) = parse_token_line(&stripped_combined) {
                         let _ = tx_read.send(RunnerEvent::TokenUsage {
                             input_tokens: usage.0,
                             output_tokens: usage.1,
@@ -270,6 +298,9 @@ async fn runner_task(
                             cost_usd: usage.4,
                         });
                     }
+
+                    // Update tail to last 512 bytes of the current chunk.
+                    tail = chunk[chunk.len().saturating_sub(512)..].to_vec();
 
                     if tx_read.send(RunnerEvent::Bytes(chunk.to_vec())).is_err() {
                         break;
@@ -368,13 +399,21 @@ fn key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
-/// Parse a Claude CLI cost line and extract token counts and cost.
+/// Parse a Claude CLI cost/token line and extract token counts and cost.
 ///
-/// Pattern: `Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)`
+/// Observed format (run with RALPH_DEBUG_PTY=1 to capture and verify from .ralph/pty-debug.log):
+///   `Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)`
+///
+/// Examples:
+///   `Cost: $0.0123 (1,234 input, 567 output tokens)`
+///   `Cost: $0.0456 (10,000 input, 2,500 output, 500 cache read, 100 cache write tokens)`
+///
+/// Numbers may use comma thousands-separators (e.g. `1,234`).
+/// The input string must already have ANSI escape sequences stripped.
 ///
 /// Returns `Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd))`
 /// or `None` if the line cannot be parsed.
-fn parse_cost_line(s: &str) -> Option<(u64, u64, u64, u64, f64)> {
+fn parse_token_line(s: &str) -> Option<(u64, u64, u64, u64, f64)> {
     const COST_PREFIX: &str = "Cost: $";
 
     let cost_start = s.find(COST_PREFIX)?;
@@ -385,55 +424,108 @@ fn parse_cost_line(s: &str) -> Option<(u64, u64, u64, u64, f64)> {
     let amount_str = rest[..paren_idx].trim();
     let cost_usd: f64 = amount_str.parse().ok()?;
 
-    // Extract the token part (content between parentheses).
+    // Extract content between parentheses.
     let tokens_part = &rest[paren_idx + 1..];
     let closing_paren = tokens_part.find(')')?;
     let tokens_str = &tokens_part[..closing_paren];
 
-    // Split by comma to separate individual token counts.
-    // tokens_str is like: "100 input, 50 output tokens" or
-    // "1,000 input, 2,500 output, 100 cache read, 50 cache write tokens"
-    let parts: Vec<&str> = tokens_str.split(',').map(|s| s.trim()).collect();
-
-    // Parse input tokens: "100 input" or "1,000 input"
-    let input_part = parts.first()?;
-    let input_tokens = extract_token_count(input_part)?;
-
-    // Parse output tokens: "50 output" or "50 output tokens"
-    let output_part = parts.get(1)?;
-    let output_tokens = extract_token_count(output_part)?;
-
-    // Cache read and write tokens default to 0 if absent.
-    let cache_read_tokens = parts.get(2).and_then(|s| extract_token_count(s)).unwrap_or(0);
-    let cache_write_tokens = parts.get(3).and_then(|s| extract_token_count(s)).unwrap_or(0);
+    // Extract each labeled count by searching for known label substrings.
+    // This avoids splitting on commas, which also appear inside thousands-separated numbers.
+    let input_tokens = extract_labeled_count(tokens_str, " input")?;
+    let output_tokens = extract_labeled_count(tokens_str, " output")?;
+    let cache_read_tokens = extract_labeled_count(tokens_str, " cache read").unwrap_or(0);
+    let cache_write_tokens = extract_labeled_count(tokens_str, " cache write").unwrap_or(0);
 
     Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd))
 }
 
-/// Extract the numeric token count from a string like "100 input" or "1,000 cache read".
-/// Strips comma separators before parsing.
-fn extract_token_count(s: &str) -> Option<u64> {
-    // Find the first number sequence (before any text keyword).
-    let mut num_end = 0;
-    for (i, c) in s.chars().enumerate() {
-        if c.is_ascii_whitespace() {
-            num_end = i;
-            break;
-        }
-        if !c.is_ascii_digit() && c != ',' {
-            // Non-digit, non-comma, non-whitespace found early; not a number.
-            return None;
+/// Extract the numeric token count immediately preceding `label` in `s`.
+///
+/// For example, `extract_labeled_count("1,234 input, 567 output tokens", " input")` → `Some(1234)`.
+/// Walks backwards from the label position collecting digits and commas, then parses the result.
+fn extract_labeled_count(s: &str, label: &str) -> Option<u64> {
+    let label_pos = s.find(label)?;
+    let prefix = &s[..label_pos];
+    // Walk backwards collecting digit and comma characters (thousands separators).
+    let num_str: String = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if num_str.is_empty() {
+        return None;
+    }
+    num_str.replace(',', "").parse::<u64>().ok()
+}
+
+/// Strip ANSI/VT100 escape sequences from a string, returning plain text.
+///
+/// Removes:
+/// - CSI sequences: `ESC [` … final byte (0x40–0x7E)
+/// - OSC sequences: `ESC ]` … BEL (0x07) or ST (`ESC \`)
+/// - Bare ESC bytes for any other sequence type (only the ESC byte is dropped)
+///
+/// The input must be valid UTF-8. Multi-byte characters are preserved unchanged.
+/// All escape-sequence bytes are ASCII so iteration stays on char boundaries.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            match bytes[i] {
+                b'[' => {
+                    // CSI: consume until a final byte in range 0x40–0x7E.
+                    i += 1;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC: consume until BEL (0x07) or ST (ESC \).
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b {
+                            i += 1;
+                            if i < bytes.len() && bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {
+                    // Unknown escape type: drop only the ESC byte; reprocess the next byte.
+                }
+            }
+        } else {
+            // Push the next Unicode scalar value and advance by its byte length.
+            // SAFETY: `i` is always on a char boundary (all consumed escape bytes are ASCII).
+            if let Some(c) = s[i..].chars().next() {
+                result.push(c);
+                i += c.len_utf8();
+            } else {
+                i += 1;
+            }
         }
     }
-
-    if num_end == 0 {
-        // No whitespace found or string is all digits.
-        // Try to parse the whole thing as a number.
-        num_end = s.len();
-    }
-
-    let num_str = &s[..num_end].replace(',', "");
-    num_str.parse::<u64>().ok()
+    result
 }
 
 pub struct App {
@@ -2128,5 +2220,40 @@ impl App {
             (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
             resize_rx,
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_token_line_parses_actual_format() {
+        // 1. Exact observed format with typical values (all fields present).
+        let line = "Cost: $0.0456 (10,000 input, 2,500 output, 500 cache read, 100 cache write tokens)";
+        let result = parse_token_line(line).expect("should parse full format");
+        assert_eq!(result.0, 10_000, "input_tokens");
+        assert_eq!(result.1, 2_500, "output_tokens");
+        assert_eq!(result.2, 500, "cache_read_tokens");
+        assert_eq!(result.3, 100, "cache_write_tokens");
+        assert!((result.4 - 0.0456).abs() < 1e-9, "cost_usd");
+
+        // 2. Cache tokens absent — should default to 0.
+        let line_no_cache = "Cost: $0.0123 (1,234 input, 567 output tokens)";
+        let result2 = parse_token_line(line_no_cache).expect("should parse without cache");
+        assert_eq!(result2.0, 1_234, "input_tokens");
+        assert_eq!(result2.1, 567, "output_tokens");
+        assert_eq!(result2.2, 0, "cache_read_tokens defaults to 0");
+        assert_eq!(result2.3, 0, "cache_write_tokens defaults to 0");
+        assert!((result2.4 - 0.0123).abs() < 1e-9, "cost_usd");
+
+        // 3. Numbers with comma thousands-separators (larger values).
+        let line_large = "Cost: $1.2345 (12,345 input, 6,789 output, 1,000 cache read, 500 cache write tokens)";
+        let result3 = parse_token_line(line_large).expect("should parse thousands-separated");
+        assert_eq!(result3.0, 12_345, "input_tokens");
+        assert_eq!(result3.1, 6_789, "output_tokens");
+        assert_eq!(result3.2, 1_000, "cache_read_tokens");
+        assert_eq!(result3.3, 500, "cache_write_tokens");
+        assert!((result3.4 - 1.2345).abs() < 1e-9, "cost_usd");
     }
 }

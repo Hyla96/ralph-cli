@@ -104,19 +104,56 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
             frame.render_widget(Paragraph::new("Select a workflow").block(block), top[1]);
         }
         Some(workflow) => {
-            let title = format!(
-                "Tasks ({}/{})",
-                workflow.done_count(),
-                workflow.total_count()
-            );
+            // Load usage file once for per-task token display and title aggregate.
+            let usage_file = app
+                .selected_workflow
+                .and_then(|i| app.workflows.get(i))
+                .map(|name| {
+                    let dir = app.store.workflow_dir(name);
+                    UsageFile::load(&dir).unwrap_or_default()
+                })
+                .unwrap_or_default();
+
+            let total_tokens =
+                usage_file.total.input_tokens + usage_file.total.output_tokens;
+            let title = if total_tokens > 0 {
+                format!(
+                    "Tasks ({}/{})  {}",
+                    workflow.done_count(),
+                    workflow.total_count(),
+                    format_tokens(total_tokens)
+                )
+            } else {
+                format!(
+                    "Tasks ({}/{})",
+                    workflow.done_count(),
+                    workflow.total_count()
+                )
+            };
             let block = Block::default().borders(Borders::ALL).title(title);
+
             let items: Vec<ListItem> = workflow
                 .prd
                 .tasks
                 .iter()
                 .map(|task| {
                     let check = if task.passes { "✓" } else { "○" };
-                    let text = format!("{} [{}] {}: {}", check, task.priority, task.id, task.title);
+                    let tok_suffix = if task.passes {
+                        usage_file
+                            .tasks
+                            .get(&task.id)
+                            .map(|entry| {
+                                let total = entry.input_tokens + entry.output_tokens;
+                                format!("  {}", format_tokens(total))
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let text = format!(
+                        "{} [{}] {}: {}{}",
+                        check, task.priority, task.id, task.title, tok_suffix
+                    );
                     let style = if task.passes {
                         Style::default().fg(Color::DarkGray)
                     } else {
@@ -259,6 +296,22 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
 // Claude brand orange (#DA7756).
 const CLAUDE_ORANGE: Color = Color::Rgb(218, 119, 86);
 
+/// Formats a token count with comma thousands-separators and appends " tok".
+/// Example: format_tokens(12345) → "12,345 tok"
+fn format_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    format!("{result} tok")
+}
+
 /// Renders the single-line tab bar at the top of the screen.
 ///
 /// Tabs are space-padded and separated by `│`. The active tab is REVERSED+BOLD;
@@ -363,16 +416,36 @@ fn runner_tab_context(app: &App, tab: &RunnerTab) -> Option<String> {
         .map(|w| (w.done_count(), w.total_count()))
         .unwrap_or((0, 0));
 
-    let cost_str = match &tab.state {
-        RunnerTabState::Running { .. } => format!("${:.4}", tab.current_story_cost_usd),
+    let token_str = match &tab.state {
+        RunnerTabState::Running { .. } => {
+            let task_tokens =
+                tab.current_story_input_tokens + tab.current_story_output_tokens;
+            match UsageFile::load(&workflow_dir) {
+                Ok(usage) => {
+                    let session_tokens = usage.total.input_tokens
+                        + usage.total.output_tokens
+                        + task_tokens;
+                    format!(
+                        "task: {}  session: {}",
+                        format_tokens(task_tokens),
+                        format_tokens(session_tokens)
+                    )
+                }
+                Err(_) => format!("task: {}", format_tokens(task_tokens)),
+            }
+        }
         RunnerTabState::Done => match UsageFile::load(&workflow_dir) {
-            Ok(usage) => format!("${:.4}", usage.total.estimated_cost_usd),
-            Err(_) => "$?.????".to_string(),
+            Ok(usage) => {
+                let session_tokens =
+                    usage.total.input_tokens + usage.total.output_tokens;
+                format!("session: {}", format_tokens(session_tokens))
+            }
+            Err(_) => "session: ? tok".to_string(),
         },
         RunnerTabState::Error(_) => unreachable!(),
     };
 
-    Some(format!("{task_title}  {done}/{total} tasks  iter {iter_n}  {cost_str}"))
+    Some(format!("{task_title}  {done}/{total} tasks  iter {iter_n}  {token_str}"))
 }
 
 /// Builds right-aligned notification spans to append to a status bar line.
