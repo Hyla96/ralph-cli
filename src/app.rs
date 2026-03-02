@@ -6,12 +6,13 @@ use ratatui::DefaultTerminal;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use vt100::Parser as VtParser;
 
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
+use crate::ralph::watcher::{Watcher, WatcherEvent};
 use crate::ralph::workflow::Workflow;
 
 // Maximum number of ralph loop iterations before the loop stops automatically.
@@ -38,6 +39,15 @@ pub struct RunnerTab {
     pub stdin_tx: Option<UnboundedSender<Vec<u8>>>,
     /// Scroll offset for the log view (0 = auto-scroll to bottom).
     pub log_scroll: usize,
+    /// When true the runner automatically spawns the next iteration on completion
+    /// without showing the ContinuePrompt dialog.
+    pub auto_continue: bool,
+    /// ID of the task currently being executed (populated from `next_task()` before spawn).
+    pub current_task_id: Option<String>,
+    /// Title of the task currently being executed.
+    pub current_task_title: Option<String>,
+    /// Number of iterations used for this runner tab (starts at 1, incremented by spawn_next_iteration).
+    pub iterations_used: u32,
 }
 
 pub enum Dialog {
@@ -249,12 +259,32 @@ pub struct App {
     /// One sender per active runner task; used to propagate terminal resize events.
     /// Dead senders (task exited) are pruned lazily when the next resize event arrives.
     pub resize_txs: Vec<UnboundedSender<(u16, u16)>>,
+    /// Receives file-change notifications from the OS-native watcher.
+    /// `None` when the watcher failed to start.
+    pub watcher_rx: Option<Receiver<WatcherEvent>>,
+    /// Keeps the OS watcher alive. Dropping this stops watching.
+    pub _watcher: Option<Watcher>,
+    /// Transient notification set after a watcher-triggered reload.
+    /// Tuple is (message_text, time_set). Cleared after 3 seconds.
+    pub notification: Option<(String, Instant)>,
 }
 
 impl App {
     pub fn new(store: Store, initial_size: (u16, u16)) -> Self {
         let workflows = store.list_workflows();
         let selected_workflow = if workflows.is_empty() { None } else { Some(0) };
+
+        // Capture the root path before `store` is moved into the App struct.
+        let root = store.root().to_path_buf();
+
+        // Start OS-native file watcher. Gracefully degrade if it fails.
+        let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel::<WatcherEvent>(64);
+        let (watcher_opt, watcher_rx_opt, watcher_warning) =
+            match Watcher::start(&root, watcher_tx) {
+                Ok(w) => (Some(w), Some(watcher_rx), None),
+                Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
+            };
+
         let mut app = App {
             running: true,
             store,
@@ -265,10 +295,13 @@ impl App {
             active_tab: 0,
             tab_nav_pending: false,
             dialog: None,
-            status_message: None,
+            status_message: watcher_warning,
             status_message_expires: None,
             initial_size,
             resize_txs: Vec::new(),
+            watcher_rx: watcher_rx_opt,
+            _watcher: watcher_opt,
+            notification: None,
         };
         app.load_current_workflow();
         app
@@ -278,6 +311,20 @@ impl App {
         while self.running {
             self.check_status_timeout();
             self.drain_runner_channels();
+            let watcher_events = self.drain_watcher_channel();
+            if !watcher_events.is_empty() {
+                let first_path = watcher_events.first().map(|e| e.path.clone());
+                self.reload_all();
+                if let Some(path) = first_path {
+                    let root = self.store.root().to_path_buf();
+                    let rel =
+                        path.strip_prefix(&root).map(|p| p.to_path_buf()).unwrap_or(path);
+                    self.notification = Some((
+                        format!("↻ {} reloaded", rel.display()),
+                        Instant::now(),
+                    ));
+                }
+            }
             if let Err(e) = terminal.draw(|frame| crate::ui::draw(frame, self)) {
                 self.display_error(e.to_string());
             }
@@ -339,7 +386,7 @@ impl App {
                 }
             } else {
                 // Runner tab keybindings.
-                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, k/Up, j/Down, G/End.
+                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, k/Up, j/Down, G/End.
                 // All other keys are forwarded as raw bytes via key_to_pty_bytes.
                 match key.code {
                     KeyCode::Char('t') => self.tab_nav_pending = true,
@@ -348,6 +395,20 @@ impl App {
                         self.running = false;
                     }
                     KeyCode::Char('s') => self.stop_runner(),
+                    KeyCode::Char('a') => {
+                        let tab_idx = self.active_tab - 1;
+                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                            tab.auto_continue = !tab.auto_continue;
+                            let msg = if tab.auto_continue {
+                                "Auto-continue ON".to_string()
+                            } else {
+                                "Auto-continue OFF".to_string()
+                            };
+                            self.status_message = Some(msg);
+                            self.status_message_expires =
+                                Some(Instant::now() + Duration::from_secs(2));
+                        }
+                    }
                     // Close a Done/Error runner tab; refuse if still Running.
                     KeyCode::Char('x') => {
                         let tab_idx = self.active_tab - 1;
@@ -646,6 +707,91 @@ impl App {
             self.status_message = None;
             self.status_message_expires = None;
         }
+        // Clear notification after 3 seconds.
+        if self
+            .notification
+            .as_ref()
+            .is_some_and(|(_, set_at)| set_at.elapsed() >= Duration::from_secs(3))
+        {
+            self.notification = None;
+        }
+    }
+
+    /// Drains all pending watcher events into a local Vec (non-blocking try_recv loop).
+    /// Returns the collected events; an empty Vec means no file changes this tick.
+    fn drain_watcher_channel(&mut self) -> Vec<WatcherEvent> {
+        let Some(rx) = self.watcher_rx.as_mut() else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Reloads all plan data from disk in response to a file-watcher event.
+    ///
+    /// Refreshes the workflow list, restores (or adjusts) the current selection,
+    /// reloads the displayed workflow, and clears any stale `ContinuePrompt` dialog.
+    /// Does not interrupt active runner subprocesses.
+    pub fn reload_all(&mut self) {
+        // Remember the currently selected workflow name to restore after the list refresh.
+        let old_name = self.selected_workflow.and_then(|i| self.workflows.get(i).cloned());
+
+        // Refresh the workflow list from disk.
+        self.workflows = self.store.list_workflows();
+
+        // Restore selection: prefer the same workflow by name; fall back to first, or None.
+        self.selected_workflow = match &old_name {
+            Some(name) => self
+                .workflows
+                .iter()
+                .position(|p| p == name)
+                .or(if self.workflows.is_empty() { None } else { Some(0) }),
+            None => {
+                if self.workflows.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
+            }
+        };
+
+        // Reload the currently selected workflow from disk.
+        self.load_current_workflow();
+
+        // Clear a stale ContinuePrompt if the referenced task no longer needs to run.
+        if let Some(Dialog::ContinuePrompt { next_id, .. }) = &self.dialog {
+            let next_id_clone = next_id.clone();
+
+            // Find the workflow name for the active runner tab.
+            let tab_workflow_name = (self.active_tab > 0)
+                .then(|| self.runner_tabs.get(self.active_tab - 1))
+                .flatten()
+                .map(|t| t.workflow_name.clone());
+
+            let task_still_pending = tab_workflow_name
+                .as_ref()
+                .map(|name| {
+                    let dir = self.store.workflow_dir(name);
+                    Workflow::load(&dir)
+                        .ok()
+                        .map(|w| w.prd.tasks.iter().any(|t| t.id == next_id_clone && !t.passes))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if !task_still_pending {
+                self.dialog = None;
+                if self.active_tab > 0
+                    && let Some(tab) = self.runner_tabs.get_mut(self.active_tab - 1)
+                    && matches!(tab.state, RunnerTabState::Running { .. })
+                {
+                    tab.state = RunnerTabState::Done;
+                }
+            }
+        }
     }
 
     /// Drains runner channels for all active runner tabs.
@@ -703,10 +849,37 @@ impl App {
             self.runner_tabs[tab_idx].parser.process(&chunk);
         }
 
-        // Complete signal: transition to Done and refresh display.
+        // Complete signal handling.
+        //
+        // Three sub-cases based on (auto_continue, done):
+        //   auto_continue=false (any done): mark Done immediately — original behavior.
+        //   auto_continue=true, done=false: sentinel arrived, process still running;
+        //     decide now — spawn next or mark Done.
+        //   auto_continue=true, done=true: defer all state changes to the done block below
+        //     so the done block can read the Running iteration and run the auto-loop.
         if complete {
-            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-            self.load_current_workflow();
+            let is_auto = self.runner_tabs[tab_idx].auto_continue;
+            if is_auto && !done {
+                // Sentinel received; process still running. Decide now.
+                self.load_current_workflow();
+                let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
+                let workflow_dir = self.store.workflow_dir(&workflow_name);
+                let tab_workflow = Workflow::load(&workflow_dir).ok();
+                let is_complete =
+                    tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                if is_complete {
+                    self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                } else {
+                    // Spawn next immediately; old process will exit on its own.
+                    // Its Exited event goes on the old (now-replaced) channel and is discarded.
+                    self.spawn_next_iteration_at(tab_idx);
+                }
+            } else if !is_auto {
+                // Original behavior: mark Done right away.
+                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                self.load_current_workflow();
+            }
+            // When is_auto && done: fall through; the done block below handles everything.
         }
 
         if done {
@@ -737,7 +910,7 @@ impl App {
                 // Reload plan from disk — ralph may have updated passes: true.
                 self.load_current_workflow();
 
-                // Determine whether to show ContinuePrompt or transition to Done.
+                // Determine whether to auto-loop, show ContinuePrompt, or transition to Done.
                 // Only act if still in Running state (not already Done from Complete signal or stop).
                 let iteration_opt = match self.runner_tabs[tab_idx].state {
                     RunnerTabState::Running { iteration } => Some(iteration),
@@ -753,25 +926,58 @@ impl App {
                     let is_complete =
                         tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
 
-                    if is_complete {
-                        self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                    } else if iteration >= MAX_ITERATIONS {
-                        let msg =
-                            format!("\r\nMax iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n");
-                        self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
-                        self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                    let auto_continue = self.runner_tabs[tab_idx].auto_continue;
+
+                    if auto_continue {
+                        // Sentinel (complete) takes precedence: treat as success regardless of
+                        // exit code. Without sentinel, exit code 0 is success.
+                        let is_success =
+                            complete || matches!(exited_code, Some(Some(0)));
+
+                        if is_complete {
+                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        } else if is_success {
+                            // Success: spawn next iteration immediately.
+                            self.spawn_next_iteration_at(tab_idx);
+                        } else if iteration >= MAX_ITERATIONS {
+                            let msg = format!(
+                                "\r\n[runner] Max iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
+                            );
+                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
+                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        } else {
+                            // Failure within limit: write retry log and spawn next.
+                            let exit_code =
+                                match exited_code { Some(Some(c)) => c, _ => 1u32 };
+                            let msg = format!(
+                                "\r\n[runner] Task failed (exit {exit_code}), retrying\u{2026} ({iteration}/{MAX_ITERATIONS})\r\n"
+                            );
+                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
+                            self.spawn_next_iteration_at(tab_idx);
+                        }
                     } else {
-                        // Natural exit within limit — ask user whether to continue.
-                        let next = tab_workflow
-                            .as_ref()
-                            .and_then(|w| w.next_task())
-                            .map(|t| (t.id.clone(), t.title.clone()))
-                            .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
-                        self.dialog = Some(Dialog::ContinuePrompt {
-                            next_id: next.0,
-                            next_title: next.1,
-                        });
-                        // Keep Running { iteration } while awaiting the user's decision.
+                        // auto_continue=false: original ContinuePrompt behavior.
+                        if is_complete {
+                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        } else if iteration >= MAX_ITERATIONS {
+                            let msg = format!(
+                                "\r\nMax iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
+                            );
+                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
+                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        } else {
+                            // Natural exit within limit — ask user whether to continue.
+                            let next = tab_workflow
+                                .as_ref()
+                                .and_then(|w| w.next_task())
+                                .map(|t| (t.id.clone(), t.title.clone()))
+                                .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
+                            self.dialog = Some(Dialog::ContinuePrompt {
+                                next_id: next.0,
+                                next_title: next.1,
+                            });
+                            // Keep Running { iteration } while awaiting the user's decision.
+                        }
                     }
                 }
             }
@@ -816,6 +1022,17 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
+        // Load workflow to populate current task info before spawning.
+        let (current_task_id, current_task_title) = {
+            let workflow_dir = self.store.workflow_dir(&name);
+            match Workflow::load(&workflow_dir).ok().and_then(|w| {
+                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
+            }) {
+                Some((id, title)) => (Some(id), Some(title)),
+                None => (None, None),
+            }
+        };
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -837,6 +1054,10 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
+            tab.auto_continue = false;
+            tab.current_task_id = current_task_id;
+            tab.current_task_title = current_task_title;
+            tab.iterations_used = 1;
             self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
         } else {
             let tab = RunnerTab {
@@ -847,6 +1068,10 @@ impl App {
                 runner_kill_tx: Some(kill_tx),
                 stdin_tx: Some(stdin_tx),
                 log_scroll: 0,
+                auto_continue: false,
+                current_task_id,
+                current_task_title,
+                iterations_used: 1,
             };
             self.runner_tabs.push(tab);
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
@@ -864,8 +1089,13 @@ impl App {
         if self.active_tab == 0 {
             return;
         }
-        let tab_idx = self.active_tab - 1;
+        self.spawn_next_iteration_at(self.active_tab - 1);
+    }
 
+    /// Spawns the next claude iteration on the runner tab at `tab_idx`.
+    /// Increments the iteration counter and replaces the subprocess channels.
+    /// Requires the tab to be in `Running { iteration }` state; returns early otherwise.
+    fn spawn_next_iteration_at(&mut self, tab_idx: usize) {
         // Extract workflow_name and iteration without holding a borrow.
         let (name, iteration) = {
             let Some(tab) = self.runner_tabs.get(tab_idx) else {
@@ -881,6 +1111,19 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
+        // Load workflow to update current task info before spawning.
+        let (current_task_id, current_task_title) = {
+            let workflow_dir = self.store.workflow_dir(&name);
+            match Workflow::load(&workflow_dir).ok().and_then(|w| {
+                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
+            }) {
+                Some((id, title)) => (Some(id), Some(title)),
+                None => (None, None),
+            }
+        };
+
+        let new_iteration = iteration + 1;
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -890,7 +1133,10 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
-            tab.state = RunnerTabState::Running { iteration: iteration + 1 };
+            tab.state = RunnerTabState::Running { iteration: new_iteration };
+            tab.current_task_id = current_task_id;
+            tab.current_task_title = current_task_title;
+            tab.iterations_used = new_iteration;
         }
 
         self.resize_txs.push(resize_tx);
