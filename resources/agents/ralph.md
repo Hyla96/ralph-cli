@@ -3,7 +3,7 @@ name: ralph
 description: "Autonomous coding agent that iterates with clean context"
 model: sonnet
 color: blue
-tools: Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Bash(cat:*)
+tools: Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Bash(cat:*), Bash(printf:*)
 ---
 
 # Ralph Agent Instructions

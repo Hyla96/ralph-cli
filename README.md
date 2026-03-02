@@ -1,6 +1,6 @@
 # ralph-cli
 
-A Rust TUI for managing and running [Ralph](https://github.com/anthropics/claude-code) agent loops. Replaces the `scripts/ralph/ralph.sh` and `scripts/ralph/ralph-status.sh` bash scripts with a live terminal dashboard.
+A Rust TUI for managing and running [Ralph](https://ghuntley.com/ralph/) agent loops with [Claude Code](https://github.com/anthropics/claude-code).
 
 ---
 
@@ -59,41 +59,41 @@ Workflows live inside the repository under `.ralph/workflows/`:
 
 ### Workflows tab
 
-| Key | Action |
-|---|---|
-| `j` / `↓` | Move selection down |
-| `k` / `↑` | Move selection up |
-| `r` | Run selected workflow (opens a new runner tab) |
-| `s` | Stop the runner for the selected workflow |
-| `n` | Open "New workflow" dialog |
-| `e` | Edit `prd.json` in `$EDITOR` |
-| `d` | Delete selected workflow (with confirmation) |
-| `?` | Open help overlay |
-| `t` + chord | Navigate tabs (see below) |
-| `q` / `Ctrl+C` | Quit |
+| Key            | Action                                         |
+| -------------- | ---------------------------------------------- |
+| `j` / `↓`      | Move selection down                            |
+| `k` / `↑`      | Move selection up                              |
+| `r`            | Run selected workflow (opens a new runner tab) |
+| `s`            | Stop the runner for the selected workflow      |
+| `n`            | Open "New workflow" dialog                     |
+| `e`            | Edit `prd.json` in `$EDITOR`                   |
+| `d`            | Delete selected workflow (with confirmation)   |
+| `?`            | Open help overlay                              |
+| `t` + chord    | Navigate tabs (see below)                      |
+| `q` / `Ctrl+C` | Quit                                           |
 
 ### Runner tab
 
-| Key | Action |
-|---|---|
-| `k` / `↑` | Scroll log up |
-| `j` / `↓` | Scroll log down |
-| `G` / `End` | Jump to bottom (resume auto-scroll) |
-| `s` | Stop the runner |
-| `x` | Close tab (only when runner is done or errored) |
-| `Enter` | Send input buffer to subprocess stdin |
-| `Esc` | Clear input buffer without sending |
-| `t` + chord | Navigate tabs (see below) |
-| `q` / `Ctrl+C` | Quit |
+| Key            | Action                                          |
+| -------------- | ----------------------------------------------- |
+| `k` / `↑`      | Scroll log up                                   |
+| `j` / `↓`      | Scroll log down                                 |
+| `G` / `End`    | Jump to bottom (resume auto-scroll)             |
+| `s`            | Stop the runner                                 |
+| `x`            | Close tab (only when runner is done or errored) |
+| `Enter`        | Send input buffer to subprocess stdin           |
+| `Esc`          | Clear input buffer without sending              |
+| `t` + chord    | Navigate tabs (see below)                       |
+| `q` / `Ctrl+C` | Quit                                            |
 
 ### Tab navigation (`t` chord)
 
 Press `t`, then:
 
-| Key | Action |
-|---|---|
-| `1`–`9` | Jump to tab by number (1 = Workflows tab) |
-| `←` / `→` | Cycle through tabs with wrapping |
+| Key       | Action                                    |
+| --------- | ----------------------------------------- |
+| `1`–`9`   | Jump to tab by number (1 = Workflows tab) |
+| `←` / `→` | Cycle through tabs with wrapping          |
 
 ---
 
@@ -152,14 +152,14 @@ src/
 
 ### Key dependencies
 
-| Crate | Purpose |
-|---|---|
-| `ratatui` | Terminal UI framework |
-| `crossterm` | Cross-platform terminal backend |
-| `serde` + `serde_json` | prd.json serialization |
-| `anyhow` | Error handling |
-| `tokio` | Async runtime for subprocess streaming |
-| `clap` | CLI argument parsing |
+| Crate                  | Purpose                                |
+| ---------------------- | -------------------------------------- |
+| `ratatui`              | Terminal UI framework                  |
+| `crossterm`            | Cross-platform terminal backend        |
+| `serde` + `serde_json` | prd.json serialization                 |
+| `anyhow`               | Error handling                         |
+| `tokio`                | Async runtime for subprocess streaming |
+| `clap`                 | CLI argument parsing                   |
 
 ---
 

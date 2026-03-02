@@ -13,11 +13,15 @@ use vt100::Parser as VtParser;
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
 use crate::ralph::watcher::{Watcher, WatcherEvent};
-use crate::ralph::workflow::Workflow;
+use crate::ralph::workflow::{Task, Workflow};
 
 // Maximum number of ralph loop iterations before the loop stops automatically.
 // TODO: make configurable
 const MAX_ITERATIONS: u32 = 10;
+
+// Rows consumed by UI chrome around the PTY viewport:
+// 1 tab bar + 1 top border + 1 bottom border + 1 status line.
+const PTY_ROW_OVERHEAD: u16 = 4;
 
 /// Per-runner tab state.
 pub enum RunnerTabState {
@@ -51,10 +55,89 @@ pub struct RunnerTab {
 }
 
 pub enum Dialog {
-    NewWorkflow { input: String, error: Option<String> },
-    DeleteWorkflow { name: String },
-    ContinuePrompt { next_id: String, next_title: String },
+    NewWorkflow {
+        input: String,
+        error: Option<String>,
+    },
+    DeleteWorkflow {
+        name: String,
+    },
+    ContinuePrompt {
+        next_id: String,
+        next_title: String,
+    },
     Help,
+    RunnerHelp,
+}
+
+/// Which field of the metadata form currently has focus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrdEditorField {
+    Project,
+    Branch,
+    Description,
+    ValidationCommands,
+}
+
+/// Which field of the story detail form currently has focus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoryDetailField {
+    Id,
+    Title,
+    Description,
+    Priority,
+    Criteria,
+}
+
+/// Which top-level section of the PRD editor is active.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrdEditorMode {
+    /// Focus is on the metadata fields (Project, Branch, Description).
+    Metadata,
+    /// Focus is on the story list panel.
+    StoryList,
+    /// Focus is on the story detail form (fully implemented in US-003).
+    StoryDetail,
+}
+
+/// In-memory state for the full-screen plan-metadata editor.
+pub struct PrdEditorState {
+    /// Name of the workflow being edited (used to resolve the directory).
+    pub workflow_name: String,
+    pub project: String,
+    pub branch: String,
+    pub description: String,
+    /// Which metadata field has focus when mode == Metadata.
+    pub focused_field: PrdEditorField,
+    /// Which top-level section of the editor is active.
+    pub mode: PrdEditorMode,
+    /// In-memory copy of all tasks; mutated by story list add/delete.
+    pub stories: Vec<Task>,
+    /// Index of the currently selected story in the story list.
+    /// When mode == StoryDetail, this is the index of the story being edited
+    /// (or None when is_new_story == true).
+    pub selected_story: Option<usize>,
+    /// True when StoryDetail was opened via [a] (new story) rather than Enter.
+    pub is_new_story: bool,
+    /// Some(idx) = delete confirmation prompt is shown for the story at that index.
+    pub confirm_delete: Option<usize>,
+    /// Transient error/status shown in the hint line; cleared on next keystroke.
+    pub status: Option<String>,
+    /// Validation commands list (one per line); populated from prd.json.
+    pub validation_commands: Vec<String>,
+    /// Index of the currently active validation command line (within validation_commands).
+    pub validation_commands_cursor: usize,
+    // Story detail editing fields (valid when mode == StoryDetail; populated on entry).
+    pub story_id: String,
+    pub story_title: String,
+    pub story_description: String,
+    pub story_priority: String,
+    /// One string per criterion; may be empty when criteria list is empty.
+    pub story_criteria: Vec<String>,
+    /// Index of the currently active criterion line (within story_criteria).
+    pub story_criteria_cursor: usize,
+    /// Which field of the story detail form has focus.
+    pub story_focused_field: StoryDetailField,
 }
 
 /// Spawns `claude --agent ralph` inside a PTY and streams output lines back via `tx`.
@@ -83,7 +166,12 @@ async fn runner_task(
 
     let (cols, rows) = size;
     let pty_system = native_pty_system();
-    let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+    let pair = match pty_system.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(RunnerEvent::SpawnError(format!("PTY open failed: {e}")));
@@ -180,14 +268,22 @@ async fn runner_task(
         use portable_pty::PtySize;
         let mut resize_rx = resize_rx;
         while let Some((cols, rows)) = resize_rx.recv().await {
-            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
     }));
 
     // Wait for the child to exit in a blocking task; send the exit code via oneshot.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<u32>();
     tokio::task::spawn_blocking(move || {
-        let code = child.wait().map(|s| if s.success() { 0u32 } else { 1u32 }).unwrap_or(1u32);
+        let code = child
+            .wait()
+            .map(|s| if s.success() { 0u32 } else { 1u32 })
+            .unwrap_or(1u32);
         let _ = done_tx.send(code);
     });
 
@@ -200,8 +296,13 @@ async fn runner_task(
         let _ = killer.kill();
     }
 
-    // Wait for the reader to drain all remaining PTY output before sending Exited.
-    let _ = read_handle.await;
+    // Drain remaining PTY output, but with a 500 ms timeout.
+    // Claude may spawn subprocesses (git, test runners, etc.) that inherit the PTY
+    // slave fd.  Those processes keep the slave open after the main claude process
+    // exits, which would cause reader.read() to block forever — preventing the
+    // Exited event from ever being sent and leaving the tab stuck in Running state.
+    let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
+
     // None = killed, Some(n) = natural exit with code n.
     let _ = tx.send(RunnerEvent::Exited(exit_code));
 }
@@ -267,6 +368,9 @@ pub struct App {
     /// Transient notification set after a watcher-triggered reload.
     /// Tuple is (message_text, time_set). Cleared after 3 seconds.
     pub notification: Option<(String, Instant)>,
+    /// When `Some`, the full-screen PRD metadata editor is active.
+    /// All key input is routed to the editor; normal TUI is hidden.
+    pub prd_editor: Option<PrdEditorState>,
 }
 
 impl App {
@@ -279,11 +383,11 @@ impl App {
 
         // Start OS-native file watcher. Gracefully degrade if it fails.
         let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel::<WatcherEvent>(64);
-        let (watcher_opt, watcher_rx_opt, watcher_warning) =
-            match Watcher::start(&root, watcher_tx) {
-                Ok(w) => (Some(w), Some(watcher_rx), None),
-                Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
-            };
+        let (watcher_opt, watcher_rx_opt, watcher_warning) = match Watcher::start(&root, watcher_tx)
+        {
+            Ok(w) => (Some(w), Some(watcher_rx), None),
+            Err(e) => (None, None, Some(format!("file watcher unavailable: {e}"))),
+        };
 
         let mut app = App {
             running: true,
@@ -302,6 +406,7 @@ impl App {
             watcher_rx: watcher_rx_opt,
             _watcher: watcher_opt,
             notification: None,
+            prd_editor: None,
         };
         app.load_current_workflow();
         app
@@ -317,12 +422,12 @@ impl App {
                 self.reload_all();
                 if let Some(path) = first_path {
                     let root = self.store.root().to_path_buf();
-                    let rel =
-                        path.strip_prefix(&root).map(|p| p.to_path_buf()).unwrap_or(path);
-                    self.notification = Some((
-                        format!("↻ {} reloaded", rel.display()),
-                        Instant::now(),
-                    ));
+                    let rel = path
+                        .strip_prefix(&root)
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or(path);
+                    self.notification =
+                        Some((format!("↻ {} reloaded", rel.display()), Instant::now()));
                 }
             }
             if let Err(e) = terminal.draw(|frame| crate::ui::draw(frame, self)) {
@@ -347,132 +452,136 @@ impl App {
         }
         match event::read()? {
             Event::Resize(cols, rows) => {
+                let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
                 // Broadcast new size to all active PTY runners; prune dead senders.
-                self.resize_txs.retain(|tx| tx.send((cols, rows)).is_ok());
+                self.resize_txs.retain(|tx| tx.send((cols, pty_rows)).is_ok());
                 // Recreate each RunnerTab's vt100::Parser with the new dimensions.
                 // vt100::Parser has no resize() method, so a new parser is created.
                 // Known limitation: the screen state is cleared on resize — scrollback is not replayed.
                 for tab in &mut self.runner_tabs {
-                    tab.parser = VtParser::new(rows, cols, 1000);
+                    tab.parser = VtParser::new(pty_rows, cols, 1000);
                     tab.log_scroll = 0;
                 }
                 self.initial_size = (cols, rows);
             }
             Event::Key(key) => {
                 #[allow(clippy::collapsible_else_if)]
-                if self.dialog.is_some() {
+                if self.prd_editor.is_some() {
+                    self.handle_prd_editor_key(key);
+                } else if self.dialog.is_some() {
                     self.handle_dialog_key(key.code);
                 } else if self.tab_nav_pending {
                     // Consume the chord: always clear the flag, then act.
                     self.tab_nav_pending = false;
                     self.handle_tab_nav_key(key.code);
                 } else if self.active_tab == 0 {
-                // Workflows tab keybindings.
-                match key.code {
-                    KeyCode::Char('t') => self.tab_nav_pending = true,
-                    KeyCode::Char('q') => self.running = false,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.running = false;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-                    KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-                    KeyCode::Char('r') => self.start_runner(),
-                    KeyCode::Char('s') => self.stop_runner(),
-                    KeyCode::Char('n') => self.open_new_workflow_dialog(),
-                    KeyCode::Char('e') => self.edit_current_plan(terminal)?,
-                    KeyCode::Char('d') => self.open_delete_workflow_dialog(),
-                    KeyCode::Char('?') => self.open_help_dialog(),
-                    _ => {}
-                }
-            } else {
-                // Runner tab keybindings.
-                // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, k/Up, j/Down, G/End.
-                // All other keys are forwarded as raw bytes via key_to_pty_bytes.
-                match key.code {
-                    KeyCode::Char('t') => self.tab_nav_pending = true,
-                    KeyCode::Char('q') => self.running = false,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.running = false;
-                    }
-                    KeyCode::Char('s') => self.stop_runner(),
-                    KeyCode::Char('a') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.auto_continue = !tab.auto_continue;
-                            let msg = if tab.auto_continue {
-                                "Auto-continue ON".to_string()
-                            } else {
-                                "Auto-continue OFF".to_string()
-                            };
-                            self.status_message = Some(msg);
-                            self.status_message_expires =
-                                Some(Instant::now() + Duration::from_secs(2));
+                    // Workflows tab keybindings.
+                    match key.code {
+                        KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Char('q') => self.running = false,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.running = false;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => self.move_up(),
+                        KeyCode::Down | KeyCode::Char('j') => self.move_down(),
+                        KeyCode::Char('r') => self.start_runner(),
+                        KeyCode::Char('s') => self.stop_runner(),
+                        KeyCode::Char('n') => self.open_new_workflow_dialog(),
+                        KeyCode::Char('e') => self.edit_current_plan(terminal)?,
+                        KeyCode::Char('E') => self.open_prd_editor(),
+                        KeyCode::Char('d') => self.open_delete_workflow_dialog(),
+                        KeyCode::Char('?') => self.open_help_dialog(),
+                        _ => {}
                     }
-                    // Close a Done/Error runner tab; refuse if still Running.
-                    KeyCode::Char('x') => {
-                        let tab_idx = self.active_tab - 1;
-                        let is_running = self
-                            .runner_tabs
-                            .get(tab_idx)
-                            .map(|t| matches!(t.state, RunnerTabState::Running { .. }))
-                            .unwrap_or(false);
-                        if is_running {
-                            self.status_message =
-                                Some("Stop the runner first [s]".to_string());
-                            self.status_message_expires =
-                                Some(Instant::now() + Duration::from_secs(2));
-                        } else if self.runner_tabs.get(tab_idx).is_some() {
-                            self.runner_tabs.remove(tab_idx);
-                            // Move to the previous tab; saturating_sub(1) gives 0 (Workflows)
-                            // when active_tab was 1 (the only runner tab).
-                            self.active_tab = self.active_tab.saturating_sub(1);
+                } else {
+                    // Runner tab keybindings.
+                    // Keys NOT forwarded to PTY: t, q, Ctrl+C, s, x, a, ?, k/Up, j/Down, G/End.
+                    // All other keys are forwarded as raw bytes via key_to_pty_bytes.
+                    match key.code {
+                        KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Char('q') => self.running = false,
+                        KeyCode::Char('?') => self.dialog = Some(Dialog::RunnerHelp),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.running = false;
                         }
-                    }
-                    // Log scroll: Up/k scroll up (into scrollback), Down/j scroll down.
-                    // log_scroll == 0 means auto-scroll (live vt100 screen).
-                    // log_scroll == N means N rows of scrollback are shown above the screen.
-                    // The scrollback position is kept in sync on the vt100 parser's screen so
-                    // that PseudoTerminal renders the correct view without needing &mut in draw.
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            // Cap at the configured scrollback size (1000 rows).
-                            tab.log_scroll = (tab.log_scroll + 1).min(1000);
-                            tab.parser.screen_mut().set_scrollback(tab.log_scroll);
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.log_scroll = tab.log_scroll.saturating_sub(1);
-                            tab.parser.screen_mut().set_scrollback(tab.log_scroll);
-                        }
-                    }
-                    // End or G re-enables auto-scroll (live screen, scrollback = 0).
-                    KeyCode::End | KeyCode::Char('G') => {
-                        let tab_idx = self.active_tab - 1;
-                        if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
-                            tab.log_scroll = 0;
-                            tab.parser.screen_mut().set_scrollback(0);
-                        }
-                    }
-                    // All other keys are forwarded directly to the PTY as raw bytes.
-                    _ => {
-                        if let Some(bytes) = key_to_pty_bytes(key) {
+                        KeyCode::Char('s') => self.stop_runner(),
+                        KeyCode::Char('a') => {
                             let tab_idx = self.active_tab - 1;
-                            if let Some(tab) = self.runner_tabs.get(tab_idx)
-                                && let Some(tx) = &tab.stdin_tx
-                            {
-                                let _ = tx.send(bytes);
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.auto_continue = !tab.auto_continue;
+                                let msg = if tab.auto_continue {
+                                    "Auto-continue ON".to_string()
+                                } else {
+                                    "Auto-continue OFF".to_string()
+                                };
+                                self.status_message = Some(msg);
+                                self.status_message_expires =
+                                    Some(Instant::now() + Duration::from_secs(2));
+                            }
+                        }
+                        // Close a Done/Error runner tab; refuse if still Running.
+                        KeyCode::Char('x') => {
+                            let tab_idx = self.active_tab - 1;
+                            let is_running = self
+                                .runner_tabs
+                                .get(tab_idx)
+                                .map(|t| matches!(t.state, RunnerTabState::Running { .. }))
+                                .unwrap_or(false);
+                            if is_running {
+                                self.status_message = Some("Stop the runner first [s]".to_string());
+                                self.status_message_expires =
+                                    Some(Instant::now() + Duration::from_secs(2));
+                            } else if self.runner_tabs.get(tab_idx).is_some() {
+                                self.runner_tabs.remove(tab_idx);
+                                // Move to the previous tab; saturating_sub(1) gives 0 (Workflows)
+                                // when active_tab was 1 (the only runner tab).
+                                self.active_tab = self.active_tab.saturating_sub(1);
+                            }
+                        }
+                        // Log scroll: Up/k scroll up (into scrollback), Down/j scroll down.
+                        // log_scroll == 0 means auto-scroll (live vt100 screen).
+                        // log_scroll == N means N rows of scrollback are shown above the screen.
+                        // The scrollback position is kept in sync on the vt100 parser's screen so
+                        // that PseudoTerminal renders the correct view without needing &mut in draw.
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                // Cap at the configured scrollback size (1000 rows).
+                                tab.log_scroll = (tab.log_scroll + 1).min(1000);
+                                tab.parser.screen_mut().set_scrollback(tab.log_scroll);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.log_scroll = tab.log_scroll.saturating_sub(1);
+                                tab.parser.screen_mut().set_scrollback(tab.log_scroll);
+                            }
+                        }
+                        // End or G re-enables auto-scroll (live screen, scrollback = 0).
+                        KeyCode::End | KeyCode::Char('G') => {
+                            let tab_idx = self.active_tab - 1;
+                            if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                tab.log_scroll = 0;
+                                tab.parser.screen_mut().set_scrollback(0);
+                            }
+                        }
+                        // All other keys are forwarded directly to the PTY as raw bytes.
+                        _ => {
+                            if let Some(bytes) = key_to_pty_bytes(key) {
+                                let tab_idx = self.active_tab - 1;
+                                if let Some(tab) = self.runner_tabs.get(tab_idx)
+                                    && let Some(tx) = &tab.stdin_tx
+                                {
+                                    let _ = tx.send(bytes);
+                                }
                             }
                         }
                     }
-                }
-            }   // closes else { block
-            }   // closes Event::Key(key) => { arm body
+                } // closes else { block
+            } // closes Event::Key(key) => { arm body
             _ => {} // other events (mouse, focus, paste, …) are ignored
-        }       // closes match event::read()?
+        } // closes match event::read()?
         Ok(())
     }
 
@@ -544,8 +653,8 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, code: KeyCode) {
-        // Help overlay: any key closes it.
-        if matches!(self.dialog, Some(Dialog::Help)) {
+        // Help overlays: any key closes them.
+        if matches!(self.dialog, Some(Dialog::Help) | Some(Dialog::RunnerHelp)) {
             self.dialog = None;
             return;
         }
@@ -638,6 +747,628 @@ impl App {
         self.dialog = Some(Dialog::Help);
     }
 
+    /// Opens the full-screen PRD metadata editor for the currently selected workflow.
+    /// Pre-populates all fields from the on-disk prd.json.
+    fn open_prd_editor(&mut self) {
+        let Some(idx) = self.selected_workflow else {
+            return;
+        };
+        let Some(name) = self.workflows.get(idx).cloned() else {
+            return;
+        };
+
+        let dir = self.store.workflow_dir(&name);
+        let workflow = match Workflow::load(&dir) {
+            Ok(w) => w,
+            Err(e) => {
+                self.status_message = Some(format!("Failed to load workflow: {e}"));
+                return;
+            }
+        };
+
+        let selected_story = if workflow.prd.tasks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.prd_editor = Some(PrdEditorState {
+            workflow_name: name,
+            project: workflow.prd.project.clone(),
+            branch: workflow.prd.branch_name.clone(),
+            description: workflow.prd.description.clone(),
+            focused_field: PrdEditorField::Project,
+            mode: PrdEditorMode::Metadata,
+            stories: workflow.prd.tasks.clone(),
+            selected_story,
+            is_new_story: false,
+            confirm_delete: None,
+            status: None,
+            validation_commands: workflow.prd.validation_commands.clone(),
+            validation_commands_cursor: 0,
+            // Story detail fields — populated when entering StoryDetail mode.
+            story_id: String::new(),
+            story_title: String::new(),
+            story_description: String::new(),
+            story_priority: String::new(),
+            story_criteria: Vec::new(),
+            story_criteria_cursor: 0,
+            story_focused_field: StoryDetailField::Id,
+        });
+    }
+
+    /// Writes the current editor state back to prd.json.
+    /// Saves project, branch, description, and the full stories list.
+    /// On success closes the editor; on error shows the message in the status line.
+    fn save_prd_editor(&mut self) {
+        // Clone the values we need before releasing the immutable borrow.
+        let (name, project, branch, description, stories, validation_commands) = match &self.prd_editor {
+            Some(e) => (
+                e.workflow_name.clone(),
+                e.project.clone(),
+                e.branch.clone(),
+                e.description.clone(),
+                e.stories.clone(),
+                e.validation_commands.clone(),
+            ),
+            None => return,
+        };
+
+        let dir = self.store.workflow_dir(&name);
+        match Workflow::load(&dir) {
+            Ok(mut workflow) => {
+                workflow.prd.project = project;
+                workflow.prd.branch_name = branch;
+                workflow.prd.description = description;
+                workflow.prd.tasks = stories;
+                workflow.prd.validation_commands = validation_commands;
+                match workflow.save(&dir) {
+                    Ok(()) => {
+                        // Verify the saved file is valid JSON and can be deserialized.
+                        match Workflow::load(&dir) {
+                            Ok(_) => {
+                                self.prd_editor = None;
+                                self.load_current_workflow();
+                            }
+                            Err(e) => {
+                                if let Some(editor) = &mut self.prd_editor {
+                                    editor.status = Some(format!("Save verification failed: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(editor) = &mut self.prd_editor {
+                            editor.status = Some(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.status = Some(format!("Load failed: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Handles a key event while the PRD editor is open.
+    ///
+    /// Dispatch order:
+    ///   1. Delete confirmation overlay (if active) — consumes all keys.
+    ///   2. Global bindings: Esc (close / go back), Ctrl+S (save).
+    ///   3. Mode-specific handlers: Metadata, StoryList, StoryDetail.
+    fn handle_prd_editor_key(&mut self, key: KeyEvent) {
+        // Extract mode and confirm_delete without holding a borrow.
+        let (mode, confirm_delete) = match &self.prd_editor {
+            Some(e) => (e.mode.clone(), e.confirm_delete),
+            None => return,
+        };
+
+        // Delete confirmation overlay: y confirms, anything else cancels.
+        if let Some(del_idx) = confirm_delete {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(editor) = &mut self.prd_editor {
+                        editor.stories.remove(del_idx);
+                        editor.selected_story = if editor.stories.is_empty() {
+                            None
+                        } else {
+                            Some(del_idx.min(editor.stories.len() - 1))
+                        };
+                        editor.confirm_delete = None;
+                        editor.status = None;
+                    }
+                }
+                _ => {
+                    if let Some(editor) = &mut self.prd_editor {
+                        editor.confirm_delete = None;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Global bindings.
+        match key.code {
+            KeyCode::Esc => {
+                match mode {
+                    // US-003: Esc from story detail returns to story list without saving.
+                    PrdEditorMode::StoryDetail => {
+                        if let Some(editor) = &mut self.prd_editor {
+                            editor.mode = PrdEditorMode::StoryList;
+                        }
+                    }
+                    // Esc from metadata or story list closes the editor.
+                    PrdEditorMode::Metadata | PrdEditorMode::StoryList => {
+                        self.prd_editor = None;
+                    }
+                }
+                return;
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if mode == PrdEditorMode::StoryDetail {
+                    self.save_story_detail();
+                } else {
+                    self.save_prd_editor();
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Mode-specific key handling.
+        match mode {
+            PrdEditorMode::Metadata => self.handle_prd_editor_metadata_key(key),
+            PrdEditorMode::StoryList => self.handle_prd_story_list_key(key),
+            PrdEditorMode::StoryDetail => self.handle_prd_story_detail_key(key),
+        }
+    }
+
+    /// Handles key events when the metadata section (Project / Branch / Description) is active.
+    fn handle_prd_editor_metadata_key(&mut self, key: KeyEvent) {
+        // Handle 'x' delete in ValidationCommands first (before general Char branch)
+        if let KeyCode::Char('x') = key.code
+            && let Some(editor) = &mut self.prd_editor
+            && editor.focused_field == PrdEditorField::ValidationCommands
+            && editor.validation_commands_cursor < editor.validation_commands.len()
+        {
+            editor.validation_commands.remove(editor.validation_commands_cursor);
+            // Adjust cursor if we removed the last item
+            if editor.validation_commands_cursor >= editor.validation_commands.len()
+                && editor.validation_commands_cursor > 0
+            {
+                editor.validation_commands_cursor -= 1;
+            }
+            editor.status = None;
+            return;
+        }
+
+        match key.code {
+            KeyCode::Tab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => editor.focused_field = PrdEditorField::Branch,
+                        PrdEditorField::Branch => {
+                            editor.focused_field = PrdEditorField::Description;
+                        }
+                        PrdEditorField::Description => {
+                            editor.focused_field = PrdEditorField::ValidationCommands;
+                        }
+                        PrdEditorField::ValidationCommands => {
+                            // Advance past the last metadata field into the story list.
+                            editor.mode = PrdEditorMode::StoryList;
+                        }
+                    }
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => {
+                            // Wrap backwards into the story list.
+                            editor.mode = PrdEditorMode::StoryList;
+                        }
+                        PrdEditorField::Branch => editor.focused_field = PrdEditorField::Project,
+                        PrdEditorField::Description => {
+                            editor.focused_field = PrdEditorField::Branch;
+                        }
+                        PrdEditorField::ValidationCommands => {
+                            editor.focused_field = PrdEditorField::Description;
+                        }
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(editor) = &mut self.prd_editor
+                    && editor.focused_field == PrdEditorField::ValidationCommands
+                    && editor.validation_commands_cursor > 0
+                {
+                    editor.validation_commands_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(editor) = &mut self.prd_editor
+                    && editor.focused_field == PrdEditorField::ValidationCommands
+                {
+                    let len = editor.validation_commands.len();
+                    if editor.validation_commands_cursor + 1 < len {
+                        editor.validation_commands_cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(editor) = &mut self.prd_editor
+                    && editor.focused_field == PrdEditorField::ValidationCommands
+                {
+                    if editor.validation_commands.is_empty() {
+                        editor.validation_commands.push(String::new());
+                    } else {
+                        let insert_pos = editor.validation_commands_cursor + 1;
+                        editor.validation_commands.insert(insert_pos, String::new());
+                        editor.validation_commands_cursor = insert_pos;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => {
+                            editor.project.pop();
+                        }
+                        PrdEditorField::Branch => {
+                            editor.branch.pop();
+                        }
+                        PrdEditorField::Description => {
+                            editor.description.pop();
+                        }
+                        PrdEditorField::ValidationCommands => {
+                            if editor.validation_commands_cursor < editor.validation_commands.len() {
+                                editor.validation_commands[editor.validation_commands_cursor].pop();
+                            }
+                        }
+                    }
+                    editor.status = None;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.focused_field {
+                        PrdEditorField::Project => editor.project.push(c),
+                        PrdEditorField::Branch => editor.branch.push(c),
+                        PrdEditorField::Description => editor.description.push(c),
+                        PrdEditorField::ValidationCommands => {
+                            if editor.validation_commands_cursor < editor.validation_commands.len() {
+                                editor.validation_commands[editor.validation_commands_cursor].push(c);
+                            }
+                        }
+                    }
+                    editor.status = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles key events when the story list panel is active.
+    fn handle_prd_story_list_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(editor) = &mut self.prd_editor
+                    && let Some(sel) = editor.selected_story
+                    && sel > 0
+                {
+                    editor.selected_story = Some(sel - 1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(editor) = &mut self.prd_editor {
+                    let len = editor.stories.len();
+                    match editor.selected_story {
+                        Some(sel) if sel + 1 < len => {
+                            editor.selected_story = Some(sel + 1);
+                        }
+                        None if len > 0 => {
+                            editor.selected_story = Some(0);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Populate story detail fields from the selected story and enter StoryDetail mode.
+                if let Some(editor) = &mut self.prd_editor
+                    && let Some(sel) = editor.selected_story
+                    && let Some(story) = editor.stories.get(sel).cloned()
+                {
+                    editor.story_id = story.id;
+                    editor.story_title = story.title;
+                    editor.story_description = story.description;
+                    editor.story_priority = story.priority.to_string();
+                    editor.story_criteria = if story.acceptance_criteria.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        story.acceptance_criteria
+                    };
+                    editor.story_criteria_cursor = 0;
+                    editor.story_focused_field = StoryDetailField::Id;
+                    editor.is_new_story = false;
+                    editor.mode = PrdEditorMode::StoryDetail;
+                    editor.status = None;
+                }
+            }
+            KeyCode::Char('a') => {
+                // Open an empty story detail form for a new story.
+                if let Some(editor) = &mut self.prd_editor {
+                    let next_num = editor.stories.len() + 1;
+                    editor.story_id = format!("US-{next_num:03}");
+                    editor.story_title = String::new();
+                    editor.story_description = String::new();
+                    editor.story_priority = next_num.to_string();
+                    editor.story_criteria = vec![String::new()];
+                    editor.story_criteria_cursor = 0;
+                    editor.story_focused_field = StoryDetailField::Id;
+                    editor.is_new_story = true;
+                    editor.mode = PrdEditorMode::StoryDetail;
+                    editor.status = None;
+                }
+            }
+            KeyCode::Char('x') => {
+                // Show delete confirmation for the currently selected story.
+                if let Some(editor) = &mut self.prd_editor
+                    && editor.selected_story.is_some()
+                {
+                    editor.confirm_delete = editor.selected_story;
+                }
+            }
+            KeyCode::Tab => {
+                // Move focus back to the metadata section (wrap to Project).
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.mode = PrdEditorMode::Metadata;
+                    editor.focused_field = PrdEditorField::Project;
+                }
+            }
+            KeyCode::BackTab => {
+                // Move focus back to the metadata section (Description).
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.mode = PrdEditorMode::Metadata;
+                    editor.focused_field = PrdEditorField::Description;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles key events when the story detail form is active.
+    ///
+    /// Field order (Tab): Id → Title → Description → Priority → Criteria → Id (wrap).
+    /// BackTab reverses the order. Within the Criteria list, Up/Down move between lines,
+    /// Enter inserts a new line below the cursor, and x deletes the focused line.
+    fn handle_prd_story_detail_key(&mut self, key: KeyEvent) {
+        // Clone focused field to avoid holding the borrow during the match.
+        let focused = match &self.prd_editor {
+            Some(e) => e.story_focused_field.clone(),
+            None => return,
+        };
+
+        match key.code {
+            KeyCode::Tab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.story_focused_field = match editor.story_focused_field {
+                        StoryDetailField::Id => StoryDetailField::Title,
+                        StoryDetailField::Title => StoryDetailField::Description,
+                        StoryDetailField::Description => StoryDetailField::Priority,
+                        StoryDetailField::Priority => StoryDetailField::Criteria,
+                        StoryDetailField::Criteria => StoryDetailField::Id,
+                    };
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.story_focused_field = match editor.story_focused_field {
+                        StoryDetailField::Id => StoryDetailField::Criteria,
+                        StoryDetailField::Title => StoryDetailField::Id,
+                        StoryDetailField::Description => StoryDetailField::Title,
+                        StoryDetailField::Priority => StoryDetailField::Description,
+                        StoryDetailField::Criteria => StoryDetailField::Priority,
+                    };
+                }
+            }
+            KeyCode::Up if focused == StoryDetailField::Criteria => {
+                if let Some(editor) = &mut self.prd_editor
+                    && editor.story_criteria_cursor > 0
+                {
+                    editor.story_criteria_cursor -= 1;
+                }
+            }
+            KeyCode::Down if focused == StoryDetailField::Criteria => {
+                if let Some(editor) = &mut self.prd_editor {
+                    let max = editor.story_criteria.len().saturating_sub(1);
+                    if editor.story_criteria_cursor < max {
+                        editor.story_criteria_cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Enter if focused == StoryDetailField::Criteria => {
+                if let Some(editor) = &mut self.prd_editor {
+                    if editor.story_criteria.is_empty() {
+                        editor.story_criteria.push(String::new());
+                        editor.story_criteria_cursor = 0;
+                    } else {
+                        let cursor = editor.story_criteria_cursor;
+                        editor.story_criteria.insert(cursor + 1, String::new());
+                        editor.story_criteria_cursor = cursor + 1;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(editor) = &mut self.prd_editor {
+                    match editor.story_focused_field {
+                        StoryDetailField::Id => {
+                            editor.story_id.pop();
+                        }
+                        StoryDetailField::Title => {
+                            editor.story_title.pop();
+                        }
+                        StoryDetailField::Description => {
+                            editor.story_description.pop();
+                        }
+                        StoryDetailField::Priority => {
+                            editor.story_priority.pop();
+                        }
+                        StoryDetailField::Criteria => {
+                            let cursor = editor.story_criteria_cursor;
+                            if let Some(line) = editor.story_criteria.get_mut(cursor) {
+                                line.pop();
+                            }
+                        }
+                    }
+                    editor.status = None;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    // x in the Criteria field deletes the focused criterion line.
+                    if c == 'x'
+                        && editor.story_focused_field == StoryDetailField::Criteria
+                        && !editor.story_criteria.is_empty()
+                    {
+                        let cursor = editor.story_criteria_cursor;
+                        editor.story_criteria.remove(cursor);
+                        editor.story_criteria_cursor = if editor.story_criteria.is_empty() {
+                            0
+                        } else {
+                            cursor.min(editor.story_criteria.len() - 1)
+                        };
+                    } else {
+                        match editor.story_focused_field {
+                            StoryDetailField::Id => editor.story_id.push(c),
+                            StoryDetailField::Title => editor.story_title.push(c),
+                            StoryDetailField::Description => editor.story_description.push(c),
+                            StoryDetailField::Priority => editor.story_priority.push(c),
+                            StoryDetailField::Criteria => {
+                                if editor.story_criteria.is_empty() {
+                                    editor.story_criteria.push(c.to_string());
+                                } else {
+                                    let cursor = editor.story_criteria_cursor;
+                                    if let Some(line) = editor.story_criteria.get_mut(cursor) {
+                                        line.push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    editor.status = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Saves the story detail form back into the in-memory story list, then persists
+    /// the full plan (metadata + all stories) to prd.json.  Returns to StoryList mode
+    /// on success; shows an error in the hint line on failure.
+    fn save_story_detail(&mut self) {
+        // Build the Task from story detail fields (clone to release the borrow).
+        let (workflow_name, task, project, branch, description, is_new, selected_idx) = {
+            let editor = match &self.prd_editor {
+                Some(e) => e,
+                None => return,
+            };
+            let priority = editor.story_priority.parse::<u32>().unwrap_or(1);
+            // Drop empty criterion lines before saving.
+            let criteria: Vec<String> = editor
+                .story_criteria
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect();
+            // Preserve passes / notes from the original story when editing.
+            let (passes, notes) = if editor.is_new_story {
+                (false, String::new())
+            } else {
+                editor
+                    .selected_story
+                    .and_then(|i| editor.stories.get(i))
+                    .map(|s| (s.passes, s.notes.clone()))
+                    .unwrap_or((false, String::new()))
+            };
+            let task = Task {
+                id: editor.story_id.clone(),
+                title: editor.story_title.clone(),
+                description: editor.story_description.clone(),
+                acceptance_criteria: criteria,
+                priority,
+                passes,
+                notes,
+            };
+            (
+                editor.workflow_name.clone(),
+                task,
+                editor.project.clone(),
+                editor.branch.clone(),
+                editor.description.clone(),
+                editor.is_new_story,
+                editor.selected_story,
+            )
+        };
+
+        // Update the in-memory story list and switch back to StoryList mode.
+        if let Some(editor) = &mut self.prd_editor {
+            if is_new {
+                editor.stories.push(task.clone());
+                let new_idx = editor.stories.len() - 1;
+                editor.selected_story = Some(new_idx);
+            } else if let Some(idx) = selected_idx
+                && let Some(existing) = editor.stories.get_mut(idx)
+            {
+                *existing = task.clone();
+            }
+            editor.mode = PrdEditorMode::StoryList;
+            editor.status = None;
+        }
+
+        // Persist updated metadata + stories to disk.
+        let updated_stories = match &self.prd_editor {
+            Some(e) => e.stories.clone(),
+            None => return,
+        };
+
+        let dir = self.store.workflow_dir(&workflow_name);
+        match Workflow::load(&dir) {
+            Ok(mut workflow) => {
+                workflow.prd.project = project;
+                workflow.prd.branch_name = branch;
+                workflow.prd.description = description;
+                workflow.prd.tasks = updated_stories;
+                match workflow.save(&dir) {
+                    Ok(()) => {
+                        // Verify the saved file is valid JSON and can be deserialized.
+                        match Workflow::load(&dir) {
+                            Ok(_) => {
+                                self.load_current_workflow();
+                            }
+                            Err(e) => {
+                                if let Some(editor) = &mut self.prd_editor {
+                                    editor.status = Some(format!("Save verification failed: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(editor) = &mut self.prd_editor {
+                            editor.status = Some(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(editor) = &mut self.prd_editor {
+                    editor.status = Some(format!("Load failed: {e}"));
+                }
+            }
+        }
+    }
+
     fn open_new_workflow_dialog(&mut self) {
         self.dialog = Some(Dialog::NewWorkflow {
             input: String::new(),
@@ -660,7 +1391,11 @@ impl App {
         self.selected_workflow = if self.workflows.is_empty() {
             None
         } else {
-            Some(old_idx.map(|i| i.min(self.workflows.len() - 1)).unwrap_or(0))
+            Some(
+                old_idx
+                    .map(|i| i.min(self.workflows.len() - 1))
+                    .unwrap_or(0),
+            )
         };
         self.load_current_workflow();
     }
@@ -737,18 +1472,25 @@ impl App {
     /// Does not interrupt active runner subprocesses.
     pub fn reload_all(&mut self) {
         // Remember the currently selected workflow name to restore after the list refresh.
-        let old_name = self.selected_workflow.and_then(|i| self.workflows.get(i).cloned());
+        let old_name = self
+            .selected_workflow
+            .and_then(|i| self.workflows.get(i).cloned());
 
         // Refresh the workflow list from disk.
         self.workflows = self.store.list_workflows();
 
         // Restore selection: prefer the same workflow by name; fall back to first, or None.
         self.selected_workflow = match &old_name {
-            Some(name) => self
-                .workflows
-                .iter()
-                .position(|p| p == name)
-                .or(if self.workflows.is_empty() { None } else { Some(0) }),
+            Some(name) => {
+                self.workflows
+                    .iter()
+                    .position(|p| p == name)
+                    .or(if self.workflows.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    })
+            }
             None => {
                 if self.workflows.is_empty() {
                     None
@@ -777,7 +1519,12 @@ impl App {
                     let dir = self.store.workflow_dir(name);
                     Workflow::load(&dir)
                         .ok()
-                        .map(|w| w.prd.tasks.iter().any(|t| t.id == next_id_clone && !t.passes))
+                        .map(|w| {
+                            w.prd
+                                .tasks
+                                .iter()
+                                .any(|t| t.id == next_id_clone && !t.passes)
+                        })
                         .unwrap_or(false)
                 })
                 .unwrap_or(false);
@@ -923,8 +1670,10 @@ impl App {
                     let workflow_dir = self.store.workflow_dir(&workflow_name);
                     let tab_workflow = Workflow::load(&workflow_dir).ok();
 
-                    let is_complete =
-                        tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                    let is_complete = tab_workflow
+                        .as_ref()
+                        .map(|w| w.is_complete())
+                        .unwrap_or(false);
 
                     let auto_continue = self.runner_tabs[tab_idx].auto_continue;
 
@@ -947,8 +1696,10 @@ impl App {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                         } else {
                             // Failure within limit: write retry log and spawn next.
-                            let exit_code =
-                                match exited_code { Some(Some(c)) => c, _ => 1u32 };
+                            let exit_code = match exited_code {
+                                Some(Some(c)) => c,
+                                _ => 1u32,
+                            };
                             let msg = format!(
                                 "\r\n[runner] Task failed (exit {exit_code}), retrying\u{2026} ({iteration}/{MAX_ITERATIONS})\r\n"
                             );
@@ -1011,9 +1762,11 @@ impl App {
         };
 
         // Prevent starting a second runner for the same workflow while one is active.
-        if self.runner_tabs.iter().any(|t| {
-            t.workflow_name == name && matches!(t.state, RunnerTabState::Running { .. })
-        }) {
+        if self
+            .runner_tabs
+            .iter()
+            .any(|t| t.workflow_name == name && matches!(t.state, RunnerTabState::Running { .. }))
+        {
             self.status_message = Some("Already running".to_string());
             self.status_message_expires = Some(Instant::now() + Duration::from_secs(2));
             return;
@@ -1025,9 +1778,10 @@ impl App {
         // Load workflow to populate current task info before spawning.
         let (current_task_id, current_task_title) = {
             let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir).ok().and_then(|w| {
-                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
-            }) {
+            match Workflow::load(&workflow_dir)
+                .ok()
+                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            {
                 Some((id, title)) => (Some(id), Some(title)),
                 None => (None, None),
             }
@@ -1040,15 +1794,15 @@ impl App {
 
         // Reuse an existing Done/Error tab for this workflow rather than accumulating tabs.
         let reuse_idx = self.runner_tabs.iter().position(|t| {
-            t.workflow_name == name
-                && !matches!(t.state, RunnerTabState::Running { .. })
+            t.workflow_name == name && !matches!(t.state, RunnerTabState::Running { .. })
         });
 
         let (cols, rows) = self.initial_size;
+        let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
         if let Some(reuse) = reuse_idx {
             let tab = &mut self.runner_tabs[reuse];
             // Reset parser with current terminal dimensions; scrollback capacity = 1000.
-            tab.parser = VtParser::new(rows, cols, 1000);
+            tab.parser = VtParser::new(pty_rows, cols, 1000);
             tab.log_scroll = 0;
             tab.state = RunnerTabState::Running { iteration: 1 };
             tab.runner_rx = Some(rx);
@@ -1062,7 +1816,7 @@ impl App {
         } else {
             let tab = RunnerTab {
                 workflow_name: name,
-                parser: VtParser::new(rows, cols, 1000),
+                parser: VtParser::new(pty_rows, cols, 1000),
                 state: RunnerTabState::Running { iteration: 1 },
                 runner_rx: Some(rx),
                 runner_kill_tx: Some(kill_tx),
@@ -1079,7 +1833,13 @@ impl App {
 
         self.resize_txs.push(resize_tx);
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
+            plan_dir,
+            repo_root,
+            tx,
+            kill_rx,
+            stdin_rx,
+            (cols, pty_rows),
+            resize_rx,
         )));
     }
 
@@ -1114,9 +1874,10 @@ impl App {
         // Load workflow to update current task info before spawning.
         let (current_task_id, current_task_title) = {
             let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir).ok().and_then(|w| {
-                w.next_task().map(|t| (t.id.clone(), t.title.clone()))
-            }) {
+            match Workflow::load(&workflow_dir)
+                .ok()
+                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            {
                 Some((id, title)) => (Some(id), Some(title)),
                 None => (None, None),
             }
@@ -1133,15 +1894,24 @@ impl App {
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
-            tab.state = RunnerTabState::Running { iteration: new_iteration };
+            tab.state = RunnerTabState::Running {
+                iteration: new_iteration,
+            };
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = new_iteration;
         }
 
         self.resize_txs.push(resize_tx);
+        let (cols, rows) = self.initial_size;
         drop(tokio::spawn(runner_task(
-            plan_dir, repo_root, tx, kill_rx, stdin_rx, self.initial_size, resize_rx,
+            plan_dir,
+            repo_root,
+            tx,
+            kill_rx,
+            stdin_rx,
+            (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
+            resize_rx,
         )));
     }
 }
