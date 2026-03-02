@@ -19,6 +19,10 @@ use crate::ralph::workflow::{Task, Workflow};
 // TODO: make configurable
 const MAX_ITERATIONS: u32 = 10;
 
+// Rows consumed by UI chrome around the PTY viewport:
+// 1 tab bar + 1 top border + 1 bottom border + 1 status line.
+const PTY_ROW_OVERHEAD: u16 = 4;
+
 /// Per-runner tab state.
 pub enum RunnerTabState {
     Running { iteration: u32 },
@@ -447,13 +451,14 @@ impl App {
         }
         match event::read()? {
             Event::Resize(cols, rows) => {
+                let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
                 // Broadcast new size to all active PTY runners; prune dead senders.
-                self.resize_txs.retain(|tx| tx.send((cols, rows)).is_ok());
+                self.resize_txs.retain(|tx| tx.send((cols, pty_rows)).is_ok());
                 // Recreate each RunnerTab's vt100::Parser with the new dimensions.
                 // vt100::Parser has no resize() method, so a new parser is created.
                 // Known limitation: the screen state is cleared on resize — scrollback is not replayed.
                 for tab in &mut self.runner_tabs {
-                    tab.parser = VtParser::new(rows, cols, 1000);
+                    tab.parser = VtParser::new(pty_rows, cols, 1000);
                     tab.log_scroll = 0;
                 }
                 self.initial_size = (cols, rows);
@@ -1713,10 +1718,11 @@ impl App {
         });
 
         let (cols, rows) = self.initial_size;
+        let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
         if let Some(reuse) = reuse_idx {
             let tab = &mut self.runner_tabs[reuse];
             // Reset parser with current terminal dimensions; scrollback capacity = 1000.
-            tab.parser = VtParser::new(rows, cols, 1000);
+            tab.parser = VtParser::new(pty_rows, cols, 1000);
             tab.log_scroll = 0;
             tab.state = RunnerTabState::Running { iteration: 1 };
             tab.runner_rx = Some(rx);
@@ -1731,7 +1737,7 @@ impl App {
         } else {
             let tab = RunnerTab {
                 workflow_name: name,
-                parser: VtParser::new(rows, cols, 1000),
+                parser: VtParser::new(pty_rows, cols, 1000),
                 state: RunnerTabState::Running { iteration: 1 },
                 runner_rx: Some(rx),
                 runner_kill_tx: Some(kill_tx),
@@ -1754,7 +1760,7 @@ impl App {
             tx,
             kill_rx,
             stdin_rx,
-            self.initial_size,
+            (cols, pty_rows),
             resize_rx,
         )));
     }
@@ -1819,13 +1825,14 @@ impl App {
         }
 
         self.resize_txs.push(resize_tx);
+        let (cols, rows) = self.initial_size;
         drop(tokio::spawn(runner_task(
             plan_dir,
             repo_root,
             tx,
             kill_rx,
             stdin_rx,
-            self.initial_size,
+            (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
             resize_rx,
         )));
     }
