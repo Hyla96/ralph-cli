@@ -2,6 +2,7 @@ use crate::app::{
     App, Dialog, PrdEditorField, PrdEditorMode, PrdEditorState, RunnerTab, RunnerTabState,
     StoryDetailField,
 };
+use crate::ralph::usage::UsageFile;
 use crate::ralph::workflow::Workflow;
 use ratatui::{
     Frame,
@@ -351,7 +352,16 @@ fn runner_tab_context(app: &App, tab: &RunnerTab) -> Option<String> {
         .map(|w| (w.done_count(), w.total_count()))
         .unwrap_or((0, 0));
 
-    Some(format!("{task_title}  {done}/{total} tasks  iter {iter_n}"))
+    let cost_str = match &tab.state {
+        RunnerTabState::Running { .. } => format!("${:.4}", tab.current_story_cost_usd),
+        RunnerTabState::Done => match UsageFile::load(&workflow_dir) {
+            Ok(usage) => format!("${:.4}", usage.total.estimated_cost_usd),
+            Err(_) => "$?.????".to_string(),
+        },
+        RunnerTabState::Error(_) => unreachable!(),
+    };
+
+    Some(format!("{task_title}  {done}/{total} tasks  iter {iter_n}  {cost_str}"))
 }
 
 /// Builds right-aligned notification spans to append to a status bar line.

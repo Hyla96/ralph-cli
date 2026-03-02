@@ -5,4 +5,11 @@ pub enum RunnerEvent {
     Complete,
     SpawnError(String),
     Resize(u16, u16),
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost_usd: f64,
+    },
 }

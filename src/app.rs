@@ -12,6 +12,7 @@ use vt100::Parser as VtParser;
 
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
+use crate::ralph::usage::{TaskUsage, UsageFile};
 use crate::ralph::watcher::{Watcher, WatcherEvent};
 use crate::ralph::workflow::{Task, Workflow};
 
@@ -52,6 +53,16 @@ pub struct RunnerTab {
     pub current_task_title: Option<String>,
     /// Number of iterations used for this runner tab (starts at 1, incremented by spawn_next_iteration).
     pub iterations_used: u32,
+    /// Accumulated input tokens for the current story.
+    pub current_story_input_tokens: u64,
+    /// Accumulated output tokens for the current story.
+    pub current_story_output_tokens: u64,
+    /// Accumulated cache read tokens for the current story.
+    pub current_story_cache_read_tokens: u64,
+    /// Accumulated cache write tokens for the current story.
+    pub current_story_cache_write_tokens: u64,
+    /// Estimated USD cost for the current story.
+    pub current_story_cost_usd: f64,
 }
 
 pub enum Dialog {
@@ -240,9 +251,23 @@ async fn runner_task(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    if String::from_utf8_lossy(chunk).contains("<promise>COMPLETE</promise>") {
+                    let chunk_str = String::from_utf8_lossy(chunk);
+
+                    if chunk_str.contains("<promise>COMPLETE</promise>") {
                         let _ = tx_read.send(RunnerEvent::Complete);
                     }
+
+                    // Scan for cost line: Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)
+                    if let Some(usage) = parse_cost_line(&chunk_str) {
+                        let _ = tx_read.send(RunnerEvent::TokenUsage {
+                            input_tokens: usage.0,
+                            output_tokens: usage.1,
+                            cache_read_tokens: usage.2,
+                            cache_write_tokens: usage.3,
+                            cost_usd: usage.4,
+                        });
+                    }
+
                     if tx_read.send(RunnerEvent::Bytes(chunk.to_vec())).is_err() {
                         break;
                     }
@@ -338,6 +363,74 @@ fn key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Left => Some(b"\x1b[D".to_vec()),
         _ => None,
     }
+}
+
+/// Parse a Claude CLI cost line and extract token counts and cost.
+///
+/// Pattern: `Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)`
+///
+/// Returns `Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd))`
+/// or `None` if the line cannot be parsed.
+fn parse_cost_line(s: &str) -> Option<(u64, u64, u64, u64, f64)> {
+    const COST_PREFIX: &str = "Cost: $";
+
+    let cost_start = s.find(COST_PREFIX)?;
+    let rest = &s[cost_start + COST_PREFIX.len()..];
+
+    // Find the opening parenthesis to separate the cost amount from token counts.
+    let paren_idx = rest.find('(')?;
+    let amount_str = rest[..paren_idx].trim();
+    let cost_usd: f64 = amount_str.parse().ok()?;
+
+    // Extract the token part (content between parentheses).
+    let tokens_part = &rest[paren_idx + 1..];
+    let closing_paren = tokens_part.find(')')?;
+    let tokens_str = &tokens_part[..closing_paren];
+
+    // Split by comma to separate individual token counts.
+    // tokens_str is like: "100 input, 50 output tokens" or
+    // "1,000 input, 2,500 output, 100 cache read, 50 cache write tokens"
+    let parts: Vec<&str> = tokens_str.split(',').map(|s| s.trim()).collect();
+
+    // Parse input tokens: "100 input" or "1,000 input"
+    let input_part = parts.first()?;
+    let input_tokens = extract_token_count(input_part)?;
+
+    // Parse output tokens: "50 output" or "50 output tokens"
+    let output_part = parts.get(1)?;
+    let output_tokens = extract_token_count(output_part)?;
+
+    // Cache read and write tokens default to 0 if absent.
+    let cache_read_tokens = parts.get(2).and_then(|s| extract_token_count(s)).unwrap_or(0);
+    let cache_write_tokens = parts.get(3).and_then(|s| extract_token_count(s)).unwrap_or(0);
+
+    Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd))
+}
+
+/// Extract the numeric token count from a string like "100 input" or "1,000 cache read".
+/// Strips comma separators before parsing.
+fn extract_token_count(s: &str) -> Option<u64> {
+    // Find the first number sequence (before any text keyword).
+    let mut num_end = 0;
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_whitespace() {
+            num_end = i;
+            break;
+        }
+        if !c.is_ascii_digit() && c != ',' {
+            // Non-digit, non-comma, non-whitespace found early; not a number.
+            return None;
+        }
+    }
+
+    if num_end == 0 {
+        // No whitespace found or string is all digits.
+        // Try to parse the whole thing as a number.
+        num_end = s.len();
+    }
+
+    let num_str = &s[..num_end].replace(',', "");
+    num_str.parse::<u64>().ok()
 }
 
 pub struct App {
@@ -1555,6 +1648,7 @@ impl App {
     fn drain_tab_channel(&mut self, tab_idx: usize) {
         // Collect events into local vecs to avoid simultaneous mutable borrows.
         let mut byte_chunks: Vec<Vec<u8>> = Vec::new();
+        let mut token_usages: Vec<(u64, u64, u64, u64, f64)> = Vec::new();
         let mut done = false;
         let mut complete = false;
         let mut spawn_error: Option<String> = None;
@@ -1572,6 +1666,15 @@ impl App {
                     Ok(RunnerEvent::Bytes(bytes)) => byte_chunks.push(bytes),
                     Ok(RunnerEvent::Complete) => complete = true,
                     Ok(RunnerEvent::Resize(_, _)) => {} // resize acks via separate channel; ignore
+                    Ok(RunnerEvent::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                        cost_usd,
+                    }) => {
+                        token_usages.push((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd));
+                    }
                     Ok(RunnerEvent::Exited(code_opt)) => {
                         exited_code = Some(code_opt);
                         done = true;
@@ -1590,6 +1693,19 @@ impl App {
                 }
             }
         } // rx borrow released
+
+        // Accumulate token and cost totals for the current story.
+        for (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd) in token_usages {
+            self.runner_tabs[tab_idx].current_story_input_tokens =
+                self.runner_tabs[tab_idx].current_story_input_tokens.saturating_add(input_tokens);
+            self.runner_tabs[tab_idx].current_story_output_tokens =
+                self.runner_tabs[tab_idx].current_story_output_tokens.saturating_add(output_tokens);
+            self.runner_tabs[tab_idx].current_story_cache_read_tokens =
+                self.runner_tabs[tab_idx].current_story_cache_read_tokens.saturating_add(cache_read_tokens);
+            self.runner_tabs[tab_idx].current_story_cache_write_tokens =
+                self.runner_tabs[tab_idx].current_story_cache_write_tokens.saturating_add(cache_write_tokens);
+            self.runner_tabs[tab_idx].current_story_cost_usd += cost_usd;
+        }
 
         // Feed raw bytes into the vt100 parser.
         for chunk in byte_chunks {
@@ -1656,6 +1772,32 @@ impl App {
             } else {
                 // Reload plan from disk — ralph may have updated passes: true.
                 self.load_current_workflow();
+
+                // Persist token usage to usage.json.
+                {
+                    let tab = &self.runner_tabs[tab_idx];
+                    let workflow_name = tab.workflow_name.clone();
+                    let task_id = tab.current_task_id.clone();
+                    let workflow_dir = self.store.workflow_dir(&workflow_name);
+                    let task_usage = TaskUsage {
+                        input_tokens: tab.current_story_input_tokens,
+                        output_tokens: tab.current_story_output_tokens,
+                        cache_read_tokens: tab.current_story_cache_read_tokens,
+                        cache_write_tokens: tab.current_story_cache_write_tokens,
+                        estimated_cost_usd: tab.current_story_cost_usd,
+                    };
+                    if let Some(task_id) = task_id {
+                        match UsageFile::load(&workflow_dir) {
+                            Ok(mut usage_file) => {
+                                usage_file.record_story(&task_id, task_usage);
+                                let _ = usage_file.save(&workflow_dir);
+                            }
+                            Err(_) => {
+                                // Silently swallow load errors; don't crash the app
+                            }
+                        }
+                    }
+                }
 
                 // Determine whether to auto-loop, show ContinuePrompt, or transition to Done.
                 // Only act if still in Running state (not already Done from Complete signal or stop).
@@ -1812,6 +1954,11 @@ impl App {
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = 1;
+            tab.current_story_input_tokens = 0;
+            tab.current_story_output_tokens = 0;
+            tab.current_story_cache_read_tokens = 0;
+            tab.current_story_cache_write_tokens = 0;
+            tab.current_story_cost_usd = 0.0;
             self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
         } else {
             let tab = RunnerTab {
@@ -1826,6 +1973,11 @@ impl App {
                 current_task_id,
                 current_task_title,
                 iterations_used: 1,
+                current_story_input_tokens: 0,
+                current_story_output_tokens: 0,
+                current_story_cache_read_tokens: 0,
+                current_story_cache_write_tokens: 0,
+                current_story_cost_usd: 0.0,
             };
             self.runner_tabs.push(tab);
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
@@ -1891,6 +2043,12 @@ impl App {
         let (resize_tx, resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
 
         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+            // Reset token and cost fields at the start of a new iteration.
+            tab.current_story_input_tokens = 0;
+            tab.current_story_output_tokens = 0;
+            tab.current_story_cache_read_tokens = 0;
+            tab.current_story_cache_write_tokens = 0;
+            tab.current_story_cost_usd = 0.0;
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
