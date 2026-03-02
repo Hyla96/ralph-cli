@@ -245,6 +245,8 @@ async fn runner_task(
     // Read PTY output in a blocking thread: send raw 4096-byte chunks as Bytes events.
     // <promise>COMPLETE</promise> is detected by scanning the chunk as lossy UTF-8.
     let tx_read = tx.clone();
+    let debug_pty = std::env::var("RALPH_DEBUG_PTY").is_ok();
+    let debug_log_path = repo_root.join(".ralph").join("pty-debug.log");
     let read_handle = tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let mut buf = [0u8; 4096];
@@ -255,6 +257,22 @@ async fn runner_task(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     let chunk_str = String::from_utf8_lossy(chunk);
+
+                    // When RALPH_DEBUG_PTY=1, append ANSI-stripped text to .ralph/pty-debug.log
+                    // so the actual Claude CLI output format can be inspected.
+                    // The raw bytes are forwarded unchanged; only the stripped copy is logged.
+                    if debug_pty {
+                        use std::io::Write;
+                        let stripped = strip_ansi(&chunk_str);
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&debug_log_path)
+                        {
+                            let _ = write!(f, "{stripped}");
+                            let _ = writeln!(f, "\n---");
+                        }
+                    }
 
                     if chunk_str.contains("<promise>COMPLETE</promise>") {
                         let _ = tx_read.send(RunnerEvent::Complete);
@@ -370,7 +388,12 @@ fn key_to_pty_bytes(key: KeyEvent) -> Option<Vec<u8>> {
 
 /// Parse a Claude CLI cost line and extract token counts and cost.
 ///
-/// Pattern: `Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)`
+/// Observed format (run with RALPH_DEBUG_PTY=1 to capture and verify from .ralph/pty-debug.log):
+///   `Cost: $<amount> (<n> input, <n> output[, <n> cache read, <n> cache write] tokens)`
+///
+/// Example:
+///   `Cost: $0.0123 (1,234 input, 567 output tokens)`
+///   `Cost: $0.0456 (10,000 input, 2,500 output, 500 cache read, 100 cache write tokens)`
 ///
 /// Returns `Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd))`
 /// or `None` if the line cannot be parsed.
@@ -434,6 +457,73 @@ fn extract_token_count(s: &str) -> Option<u64> {
 
     let num_str = &s[..num_end].replace(',', "");
     num_str.parse::<u64>().ok()
+}
+
+/// Strip ANSI/VT100 escape sequences from a string, returning plain text.
+///
+/// Removes:
+/// - CSI sequences: `ESC [` … final byte (0x40–0x7E)
+/// - OSC sequences: `ESC ]` … BEL (0x07) or ST (`ESC \`)
+/// - Bare ESC bytes for any other sequence type (only the ESC byte is dropped)
+///
+/// The input must be valid UTF-8. Multi-byte characters are preserved unchanged.
+/// All escape-sequence bytes are ASCII so iteration stays on char boundaries.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            match bytes[i] {
+                b'[' => {
+                    // CSI: consume until a final byte in range 0x40–0x7E.
+                    i += 1;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC: consume until BEL (0x07) or ST (ESC \).
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b {
+                            i += 1;
+                            if i < bytes.len() && bytes[i] == b'\\' {
+                                i += 1;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {
+                    // Unknown escape type: drop only the ESC byte; reprocess the next byte.
+                }
+            }
+        } else {
+            // Push the next Unicode scalar value and advance by its byte length.
+            // SAFETY: `i` is always on a char boundary (all consumed escape bytes are ASCII).
+            if let Some(c) = s[i..].chars().next() {
+                result.push(c);
+                i += c.len_utf8();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    result
 }
 
 pub struct App {
