@@ -574,6 +574,18 @@ impl App {
                     // Workflows tab keybindings.
                     match key.code {
                         KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Tab => {
+                            let total_tabs = 1 + self.runner_tabs.len();
+                            self.active_tab = (self.active_tab + 1) % total_tabs;
+                        }
+                        KeyCode::BackTab => {
+                            let total_tabs = 1 + self.runner_tabs.len();
+                            self.active_tab = if self.active_tab == 0 {
+                                total_tabs - 1
+                            } else {
+                                self.active_tab - 1
+                            };
+                        }
                         KeyCode::Char('q') => self.running = false,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.running = false;
@@ -699,6 +711,18 @@ impl App {
                                     tab.parser.screen_mut().set_scrollback(0);
                                 }
                             }
+                            KeyCode::Tab => {
+                                let total_tabs = 1 + self.runner_tabs.len();
+                                self.active_tab = (self.active_tab + 1) % total_tabs;
+                            }
+                            KeyCode::BackTab => {
+                                let total_tabs = 1 + self.runner_tabs.len();
+                                self.active_tab = if self.active_tab == 0 {
+                                    total_tabs - 1
+                                } else {
+                                    self.active_tab - 1
+                                };
+                            }
                             // All other keys are forwarded directly to the PTY as raw bytes.
                             _ => {
                                 if let Some(bytes) = key_to_pty_bytes(key)
@@ -720,7 +744,6 @@ impl App {
     /// Handles the second key of a `t`-prefix tab navigation chord.
     ///
     /// Digits `1`–`9` jump to the tab at index `digit − 1` (0 = Workflows).
-    /// `Left`/`Right` cycle through all tabs with wrapping.
     /// Any other key is silently ignored (flag was already cleared by the caller).
     fn handle_tab_nav_key(&mut self, code: KeyCode) {
         let total_tabs = 1 + self.runner_tabs.len(); // Workflows tab + runner tabs
@@ -730,16 +753,6 @@ impl App {
                 if idx < total_tabs {
                     self.active_tab = idx;
                 }
-            }
-            KeyCode::Left => {
-                self.active_tab = if self.active_tab == 0 {
-                    total_tabs - 1
-                } else {
-                    self.active_tab - 1
-                };
-            }
-            KeyCode::Right => {
-                self.active_tab = (self.active_tab + 1) % total_tabs;
             }
             _ => {} // any other key: flag already cleared, no tab change
         }
