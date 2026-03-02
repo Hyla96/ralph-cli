@@ -66,6 +66,10 @@ pub struct RunnerTab {
     /// When true, raw key input is forwarded to the PTY (Insert mode).
     /// When false, app shortcuts are active (Normal mode).
     pub insert_mode: bool,
+    /// Set to true when a `RunnerEvent::Complete` sentinel is received during an iteration.
+    /// Cleared at the start of each new iteration and consumed in the `done` block to
+    /// determine whether the task should be treated as a success.
+    pub saw_complete: bool,
 }
 
 pub enum Dialog {
@@ -1851,39 +1855,20 @@ impl App {
             self.runner_tabs[tab_idx].parser.process(&chunk);
         }
 
+        // Track the Complete sentinel on the tab so the done block can use it
+        // even after the local `complete` variable goes out of scope.
+        if complete {
+            self.runner_tabs[tab_idx].saw_complete = true;
+        }
+
         // Complete signal handling.
         //
-        // Three sub-cases based on (auto_continue, done):
-        //   auto_continue=false (any done): mark Done immediately — original behavior.
-        //   auto_continue=true, done=false: sentinel arrived, process still running;
-        //     decide now — spawn next or mark Done.
-        //   auto_continue=true, done=true: defer all state changes to the done block below
-        //     so the done block can read the Running iteration and run the auto-loop.
-        if complete {
-            let is_auto = self.runner_tabs[tab_idx].auto_continue;
-            if is_auto && !done {
-                // Sentinel received; process still running. Decide now.
-                self.load_current_workflow();
-                let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
-                let workflow_dir = self.store.workflow_dir(&workflow_name);
-                let tab_workflow = Workflow::load(&workflow_dir).ok();
-                let is_complete =
-                    tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
-                if is_complete {
-                    self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                    self.runner_tabs[tab_idx].insert_mode = false;
-                } else {
-                    // Spawn next immediately; old process will exit on its own.
-                    // Its Exited event goes on the old (now-replaced) channel and is discarded.
-                    self.spawn_next_iteration_at(tab_idx);
-                }
-            } else if !is_auto {
-                // Original behavior: mark Done right away.
-                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                self.runner_tabs[tab_idx].insert_mode = false;
-                self.load_current_workflow();
-            }
-            // When is_auto && done: fall through; the done block below handles everything.
+        // auto_continue=false, complete, !done: mark Done immediately (original behavior).
+        // auto_continue=true: wait for the Exited event; the done block handles all spawning.
+        if complete && !done && !self.runner_tabs[tab_idx].auto_continue {
+            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+            self.runner_tabs[tab_idx].insert_mode = false;
+            self.load_current_workflow();
         }
 
         if done {
@@ -1943,6 +1928,10 @@ impl App {
 
                 // Determine whether to auto-loop, show ContinuePrompt, or transition to Done.
                 // Only act if still in Running state (not already Done from Complete signal or stop).
+                // Read and clear saw_complete before any spawning so the next iteration starts clean.
+                let saw_complete = self.runner_tabs[tab_idx].saw_complete;
+                self.runner_tabs[tab_idx].saw_complete = false;
+
                 let iteration_opt = match self.runner_tabs[tab_idx].state {
                     RunnerTabState::Running { iteration } => Some(iteration),
                     _ => None,
@@ -1962,10 +1951,10 @@ impl App {
                     let auto_continue = self.runner_tabs[tab_idx].auto_continue;
 
                     if auto_continue {
-                        // Sentinel (complete) takes precedence: treat as success regardless of
+                        // Sentinel (saw_complete) takes precedence: treat as success regardless of
                         // exit code. Without sentinel, exit code 0 is success.
                         let is_success =
-                            complete || matches!(exited_code, Some(Some(0)));
+                            saw_complete || matches!(exited_code, Some(Some(0)));
 
                         if is_complete {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
@@ -2107,6 +2096,7 @@ impl App {
             tab.current_story_cache_write_tokens = 0;
             tab.current_story_cost_usd = 0.0;
             tab.insert_mode = false;
+            tab.saw_complete = false;
             self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
         } else {
             let tab = RunnerTab {
@@ -2127,6 +2117,7 @@ impl App {
                 current_story_cache_write_tokens: 0,
                 current_story_cost_usd: 0.0,
                 insert_mode: false,
+                saw_complete: false,
             };
             self.runner_tabs.push(tab);
             self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
@@ -2198,6 +2189,7 @@ impl App {
             tab.current_story_cache_read_tokens = 0;
             tab.current_story_cache_write_tokens = 0;
             tab.current_story_cost_usd = 0.0;
+            tab.saw_complete = false;
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
