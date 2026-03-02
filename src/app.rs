@@ -52,10 +52,6 @@ pub struct RunnerTab {
     pub current_task_title: Option<String>,
     /// Number of iterations used for this runner tab (starts at 1, incremented by spawn_next_iteration).
     pub iterations_used: u32,
-    /// Set when the COMPLETE sentinel arrives while auto_continue=true and the process
-    /// is still running.  We kill the process and wait for the Exited event; the done
-    /// block checks this flag to treat the exit as a success and spawn the next iteration.
-    pub complete_pending: bool,
 }
 
 pub enum Dialog {
@@ -1600,36 +1596,30 @@ impl App {
             self.runner_tabs[tab_idx].parser.process(&chunk);
         }
 
-        // Check for the .complete marker file written by the ralph agent.
-        // More reliable than PTY sentinel scanning: Claude Code's TUI intercepts
-        // <promise>COMPLETE</promise> and renders it as styled text — the raw XML
-        // never reaches the PTY byte stream, so RunnerEvent::Complete is never sent.
-        if !complete {
-            let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
-            let plan_dir = self.store.workflow_dir(&workflow_name);
-            let complete_file = plan_dir.join(".complete");
-            if complete_file.exists() {
-                let _ = std::fs::remove_file(&complete_file);
-                complete = true;
-            }
-        }
-
         // Complete signal handling.
         //
-        // Two sub-cases based on (auto_continue, done):
-        //   auto_continue=false: mark Done immediately — original behavior.
-        //   auto_continue=true, done=false: sentinel arrived, process still running.
-        //     Kill the process and set complete_pending so the done block knows to
-        //     treat the subsequent Exited as a success and spawn the next iteration.
-        //   auto_continue=true, done=true: fall through; done block handles everything
-        //     and will see complete=true in is_success.
+        // Three sub-cases based on (auto_continue, done):
+        //   auto_continue=false (any done): mark Done immediately — original behavior.
+        //   auto_continue=true, done=false: sentinel arrived, process still running;
+        //     decide now — spawn next or mark Done.
+        //   auto_continue=true, done=true: defer all state changes to the done block below
+        //     so the done block can read the Running iteration and run the auto-loop.
         if complete {
             let is_auto = self.runner_tabs[tab_idx].auto_continue;
             if is_auto && !done {
-                // Sentinel received; process still running — kill it and wait for Exited.
-                self.runner_tabs[tab_idx].complete_pending = true;
-                if let Some(kill_tx) = self.runner_tabs[tab_idx].runner_kill_tx.take() {
-                    let _ = kill_tx.send(());
+                // Sentinel received; process still running. Decide now.
+                self.load_current_workflow();
+                let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
+                let workflow_dir = self.store.workflow_dir(&workflow_name);
+                let tab_workflow = Workflow::load(&workflow_dir).ok();
+                let is_complete =
+                    tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                if is_complete {
+                    self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                } else {
+                    // Spawn next immediately; old process will exit on its own.
+                    // Its Exited event goes on the old (now-replaced) channel and is discarded.
+                    self.spawn_next_iteration_at(tab_idx);
                 }
             } else if !is_auto {
                 // Original behavior: mark Done right away.
@@ -1686,15 +1676,12 @@ impl App {
                         .unwrap_or(false);
 
                     let auto_continue = self.runner_tabs[tab_idx].auto_continue;
-                    // Consume the pending flag set when we killed the process after COMPLETE.
-                    let complete_pending = self.runner_tabs[tab_idx].complete_pending;
-                    self.runner_tabs[tab_idx].complete_pending = false;
 
                     if auto_continue {
                         // Sentinel (complete) takes precedence: treat as success regardless of
                         // exit code. Without sentinel, exit code 0 is success.
                         let is_success =
-                            complete || complete_pending || matches!(exited_code, Some(Some(0)));
+                            complete || matches!(exited_code, Some(Some(0)));
 
                         if is_complete {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
@@ -1822,7 +1809,6 @@ impl App {
             tab.runner_kill_tx = Some(kill_tx);
             tab.stdin_tx = Some(stdin_tx);
             tab.auto_continue = false;
-            tab.complete_pending = false;
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = 1;
@@ -1837,7 +1823,6 @@ impl App {
                 stdin_tx: Some(stdin_tx),
                 log_scroll: 0,
                 auto_continue: false,
-                complete_pending: false,
                 current_task_id,
                 current_task_title,
                 iterations_used: 1,
