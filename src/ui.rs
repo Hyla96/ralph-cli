@@ -1,5 +1,6 @@
 use crate::app::{
-    App, Dialog, PrdEditorField, PrdEditorMode, PrdEditorState, RunnerTabState, StoryDetailField,
+    App, Dialog, PrdEditorField, PrdEditorMode, PrdEditorState, RunnerTab, RunnerTabState,
+    StoryDetailField,
 };
 use crate::ralph::usage::UsageFile;
 use crate::ralph::workflow::Workflow;
@@ -428,6 +429,69 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Builds the right-aligned task context string for a runner tab status bar.
+///
+/// Returns `None` for Error state (no task context shown) or when the workflow
+/// cannot be loaded (should not normally happen). Format:
+///   `"{task_title}  {done}/{total} tasks  iter {n}"`
+/// where `task_title` is truncated to 30 visible chars with a `…` suffix if needed.
+fn runner_tab_context(app: &App, tab: &RunnerTab) -> Option<String> {
+    let iter_n = match &tab.state {
+        RunnerTabState::Running { iteration } => *iteration,
+        RunnerTabState::Done => tab.iterations_used,
+        RunnerTabState::Error(_) => return None,
+    };
+
+    let task_title = match &tab.current_task_title {
+        Some(t) => {
+            let chars: Vec<char> = t.chars().collect();
+            if chars.len() > 30 {
+                let truncated: String = chars.iter().take(29).collect();
+                format!("{truncated}…")
+            } else {
+                t.clone()
+            }
+        }
+        None => "unknown".to_string(),
+    };
+
+    let workflow_dir = app.store.workflow_dir(&tab.workflow_name);
+    let (done, total) = Workflow::load(&workflow_dir)
+        .map(|w| (w.done_count(), w.total_count()))
+        .unwrap_or((0, 0));
+
+    let token_str = match &tab.state {
+        RunnerTabState::Running { .. } => {
+            let task_tokens =
+                tab.current_story_input_tokens + tab.current_story_output_tokens;
+            match UsageFile::load(&workflow_dir) {
+                Ok(usage) => {
+                    let session_tokens = usage.total.input_tokens
+                        + usage.total.output_tokens
+                        + task_tokens;
+                    format!(
+                        "task: {}  session: {}",
+                        format_tokens(task_tokens),
+                        format_tokens(session_tokens)
+                    )
+                }
+                Err(_) => format!("task: {}", format_tokens(task_tokens)),
+            }
+        }
+        RunnerTabState::Done => match UsageFile::load(&workflow_dir) {
+            Ok(usage) => {
+                let session_tokens =
+                    usage.total.input_tokens + usage.total.output_tokens;
+                format!("session: {}", format_tokens(session_tokens))
+            }
+            Err(_) => "session: ? tok".to_string(),
+        },
+        RunnerTabState::Error(_) => unreachable!(),
+    };
+
+    Some(format!("{task_title}  {done}/{total} tasks  iter {iter_n}  {token_str}"))
 }
 
 /// Builds right-aligned notification spans to append to a status bar line.
