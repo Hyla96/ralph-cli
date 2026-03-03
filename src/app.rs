@@ -95,6 +95,8 @@ pub enum Dialog {
         /// When true, prd-source.md already exists and the user is being asked to confirm overwrite.
         confirm_overwrite: bool,
     },
+    /// Shown when the user presses [q]; y/Y confirms quit, any other key cancels.
+    QuitConfirm,
 }
 
 /// Which field of the metadata form currently has focus.
@@ -844,7 +846,7 @@ impl App {
                                 self.active_tab - 1
                             };
                         }
-                        KeyCode::Char('q') => self.running = false,
+                        KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.running = false;
                         }
@@ -921,7 +923,7 @@ impl App {
                                 }
                             }
                             KeyCode::Char('t') => self.tab_nav_pending = true,
-                            KeyCode::Char('q') => self.running = false,
+                            KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
                             KeyCode::Char('?') => self.dialog = Some(Dialog::RunnerHelp),
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 self.running = false;
@@ -1093,6 +1095,15 @@ impl App {
     }
 
     fn handle_dialog_key(&mut self, code: KeyCode) {
+        // QuitConfirm: y/Y exits the application, any other key cancels.
+        if matches!(self.dialog, Some(Dialog::QuitConfirm)) {
+            self.dialog = None;
+            if code == KeyCode::Char('y') || code == KeyCode::Char('Y') {
+                self.running = false;
+            }
+            return;
+        }
+
         // Help overlays: any key closes them.
         if matches!(self.dialog, Some(Dialog::Help) | Some(Dialog::RunnerHelp)) {
             self.dialog = None;

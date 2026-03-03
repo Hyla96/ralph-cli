@@ -63,6 +63,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }) => {
             draw_import_prd_dialog(frame, frame.area(), input, error, *confirm_overwrite);
         }
+        Some(Dialog::QuitConfirm) => {
+            draw_quit_confirm_dialog(frame, frame.area());
+        }
         None => {}
     }
 }
@@ -599,6 +602,18 @@ fn draw_delete_workflow_dialog(frame: &mut Frame, area: Rect, name: &str) {
         .borders(Borders::ALL)
         .title("Delete Workflow");
     frame.render_widget(Paragraph::new(text).block(block), dialog_rect);
+}
+
+fn draw_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
+    // 38 chars wide (2 border + 36 content), 3 rows tall (2 border + 1 content line)
+    let dialog_rect = centered_rect(38, 3, area);
+    frame.render_widget(Clear, dialog_rect);
+
+    let block = Block::default().borders(Borders::ALL).title("Quit");
+    frame.render_widget(
+        Paragraph::new("Quit ralph-tui? [y/N]").block(block),
+        dialog_rect,
+    );
 }
 
 fn draw_continue_prompt_dialog(frame: &mut Frame, area: Rect, next_id: &str, next_title: &str) {
