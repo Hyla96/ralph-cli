@@ -353,18 +353,10 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         match &tab.state {
             RunnerTabState::Running { .. } => {
                 let auto_label = if tab.auto_continue { "[a]uto:ON" } else { "[a]uto:OFF" };
-                let suffix = "[?]help  [q]uit";
-                let mut spans: Vec<Span> = Vec::new();
-                if tab.auto_continue {
-                    // Show [c]ontinue dimmed — auto mode will handle it automatically.
-                    spans.push(Span::raw(format!("[i]nsert  [s]stop  {auto_label}  ")));
-                    spans.push(Span::styled("[c]ontinue  ", Style::default().fg(Color::DarkGray)));
-                } else {
-                    // auto_continue=false: [c] not actionable in Running state; omit it.
-                    spans.push(Span::raw(format!("[i]nsert  [s]stop  {auto_label}  ")));
-                }
-                spans.push(Span::raw(suffix));
-                Line::from(spans)
+                // [c]continue is never shown in Running state regardless of auto mode.
+                Line::from(Span::raw(format!(
+                    "[i]nsert  [s]stop  {auto_label}  [?]help  [q]uit"
+                )))
             }
             RunnerTabState::Done | RunnerTabState::Stopped => {
                 let dim_style = Style::default().fg(Color::DarkGray);
