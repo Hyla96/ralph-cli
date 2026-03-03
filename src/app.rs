@@ -1958,6 +1958,15 @@ impl App {
         });
     }
 
+    /// Returns `true` if all tasks in the named workflow have `passes == true`.
+    /// Returns `false` if the workflow cannot be loaded from disk.
+    pub fn is_workflow_complete(&self, workflow_name: &str) -> bool {
+        let workflow_dir = self.store.workflow_dir(workflow_name);
+        Workflow::load(&workflow_dir)
+            .map(|w| w.is_complete())
+            .unwrap_or(false)
+    }
+
     fn move_up(&mut self) {
         if let Some(i) = self.selected_workflow
             && i > 0
@@ -2180,10 +2189,7 @@ impl App {
                 // Sentinel received; process still running. Decide now.
                 self.load_current_workflow();
                 let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
-                let workflow_dir = self.store.workflow_dir(&workflow_name);
-                let tab_workflow = Workflow::load(&workflow_dir).ok();
-                let is_complete =
-                    tab_workflow.as_ref().map(|w| w.is_complete()).unwrap_or(false);
+                let is_complete = self.is_workflow_complete(&workflow_name);
                 if is_complete {
                     self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                     self.runner_tabs[tab_idx].insert_mode = false;
@@ -2273,13 +2279,9 @@ impl App {
                 if let Some(iteration) = iteration_opt {
                     // Load the specific workflow for this runner tab (may differ from selected).
                     let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
+                    let is_complete = self.is_workflow_complete(&workflow_name);
                     let workflow_dir = self.store.workflow_dir(&workflow_name);
                     let tab_workflow = Workflow::load(&workflow_dir).ok();
-
-                    let is_complete = tab_workflow
-                        .as_ref()
-                        .map(|w| w.is_complete())
-                        .unwrap_or(false);
 
                     let auto_continue = self.runner_tabs[tab_idx].auto_continue;
 
