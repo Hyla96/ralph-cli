@@ -2296,16 +2296,18 @@ impl App {
                             self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                             self.runner_tabs[tab_idx].insert_mode = false;
                         } else {
-                            // Failure within limit: write retry log and spawn next.
-                            let exit_code = match exited_code {
-                                Some(Some(c)) => c,
-                                _ => 1u32,
-                            };
-                            let msg = format!(
-                                "\r\n[runner] Task failed (exit {exit_code}), retrying\u{2026} ({iteration}/{MAX_ITERATIONS})\r\n"
-                            );
-                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
-                            self.spawn_next_iteration_at(tab_idx);
+                            // Failure (no sentinel, non-zero exit): prompt the user instead
+                            // of auto-retrying so they can inspect output before deciding.
+                            let next = tab_workflow
+                                .as_ref()
+                                .and_then(|w| w.next_task())
+                                .map(|t| (t.id.clone(), t.title.clone()))
+                                .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
+                            self.dialog = Some(Dialog::ContinuePrompt {
+                                next_id: next.0,
+                                next_title: next.1,
+                            });
+                            // Keep Running { iteration } while awaiting the user's decision.
                         }
                     } else {
                         // auto_continue=false: transition to Done; user presses [c] to continue.
