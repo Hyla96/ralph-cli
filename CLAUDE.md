@@ -31,3 +31,8 @@ The PRD validation commands (`cargo build` and `cargo clippy -- -D warnings`) ar
 - `vt100::Parser::new(rows, cols, scrollback_len)` — rows before cols. No resize() method; recreate the parser on resize (screen state is lost).
 - tui-term 0.3.1 requires ratatui 0.30+ (via unicode-width conflict). Always use ratatui ≥ 0.30 with tui-term.
 - Scrollback position lives on the vt100 Screen (`screen_mut().set_scrollback(n)`). Update it in event handlers rather than in draw (draw takes `&App`) so `PseudoTerminal` renders the correct view without needing `&mut App`.
+
+## Git commit style
+
+- Use simple `git commit -m "message"` with a plain string. Do NOT use `$(cat <<'EOF' ...)` HEREDOC substitution in commit commands — it triggers permission prompts in automated runs.
+- Multi-line commit messages: use `git commit -m "subject" -m "body paragraph"` (multiple `-m` flags).
