@@ -243,7 +243,9 @@ async fn runner_task(
     };
 
     // Read PTY output in a blocking thread: send raw 4096-byte chunks as Bytes events.
-    // <promise>COMPLETE</promise> is detected by scanning the chunk as lossy UTF-8.
+    // <promise>COMPLETE</promise> is detected by scanning the ANSI-stripped combined buffer
+    // (tail + current chunk) so ANSI escape codes around the sentinel don't break detection,
+    // and sentinels split across two 4096-byte reads are still caught.
     let tx_read = tx.clone();
     let debug_pty = std::env::var("RALPH_DEBUG_PTY").is_ok();
     let debug_log_path = repo_root.join(".ralph").join("pty-debug.log");
@@ -277,10 +279,6 @@ async fn runner_task(
                         }
                     }
 
-                    if chunk_str.contains("<promise>COMPLETE</promise>") {
-                        let _ = tx_read.send(RunnerEvent::Complete);
-                    }
-
                     // Build combined string (tail + chunk) to handle lines split across
                     // consecutive 4096-byte PTY chunks. Strip ANSI before parsing.
                     let mut combined = Vec::with_capacity(tail.len() + n);
@@ -288,6 +286,12 @@ async fn runner_task(
                     combined.extend_from_slice(chunk);
                     let combined_lossy = String::from_utf8_lossy(&combined);
                     let stripped_combined = strip_ansi(&combined_lossy);
+
+                    // Detect the completion sentinel on the ANSI-stripped combined buffer so
+                    // that ANSI escape codes injected by the terminal don't prevent matching.
+                    if stripped_combined.contains("<promise>COMPLETE</promise>") {
+                        let _ = tx_read.send(RunnerEvent::Complete);
+                    }
 
                     if let Some(usage) = parse_token_line(&stripped_combined) {
                         let _ = tx_read.send(RunnerEvent::TokenUsage {
