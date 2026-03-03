@@ -1,4 +1,4 @@
-# ralph-cli
+# ralph-tui
 
 ## Build and development commands
 
