@@ -422,10 +422,10 @@ fn format_tokens(n: u64) -> String {
 /// Tabs are space-padded and separated by `│`. The active tab is REVERSED+BOLD;
 /// inactive tabs are dimmed. Runner tabs use the Claude brand orange.
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
-    // Build the full list of (label, is_active, is_runner) entries up front.
-    let mut entries: Vec<(String, bool, bool)> = Vec::new();
+    // Build the full list of (label, is_active, is_runner, is_done) entries up front.
+    let mut entries: Vec<(String, bool, bool, bool)> = Vec::new();
 
-    entries.push((" [1] Workflows ".to_string(), app.active_tab == 0, false));
+    entries.push((" [1] Workflows ".to_string(), app.active_tab == 0, false, false));
 
     for (i, tab) in app.runner_tabs.iter().enumerate() {
         let suffix = match &tab.state {
@@ -434,10 +434,12 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             RunnerTabState::Stopped => " \u{25a0}", // ■
             RunnerTabState::Error(_) => " !",
         };
+        let is_done = matches!(tab.state, RunnerTabState::Done);
         entries.push((
             format!(" [{}] {}{} ", i + 2, tab.workflow_name, suffix),
             app.active_tab == i + 1,
             true,
+            is_done,
         ));
     }
 
@@ -453,11 +455,18 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         .fg(CLAUDE_ORANGE)
         .add_modifier(Modifier::REVERSED)
         .add_modifier(Modifier::BOLD);
+    let done_inactive_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::DIM);
+    let done_active_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::REVERSED)
+        .add_modifier(Modifier::BOLD);
 
     let mut spans: Vec<Span> = Vec::new();
     let mut used_width: u16 = 0;
 
-    for (idx, (label, is_active, is_runner)) in entries.iter().enumerate() {
+    for (idx, (label, is_active, is_runner, is_done)) in entries.iter().enumerate() {
         // Separator between tabs (not before the first one).
         if idx > 0 {
             if used_width + 1 > area.width {
@@ -472,11 +481,13 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             break;
         }
 
-        let style = match (is_active, is_runner) {
-            (true, true) => runner_active_style,
-            (false, true) => runner_inactive_style,
-            (true, false) => active_style,
-            (false, false) => inactive_style,
+        let style = match (is_active, is_runner, is_done) {
+            (true, true, true) => done_active_style,
+            (false, true, true) => done_inactive_style,
+            (true, true, false) => runner_active_style,
+            (false, true, false) => runner_inactive_style,
+            (true, false, _) => active_style,
+            (false, false, _) => inactive_style,
         };
         spans.push(Span::styled(label.as_str(), style));
         used_width += label_w;
