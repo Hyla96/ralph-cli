@@ -372,14 +372,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             RunnerTabState::Stopped => {
-                // Stopped: same as Done for now; US-005 will replace this with restart button bar.
-                let dim_style = Style::default().fg(Color::DarkGray);
-                let continue_span = if tab.auto_continue {
-                    Span::styled("[c]ontinue  ", dim_style)
-                } else {
-                    Span::raw("[c]ontinue  ")
-                };
-                Line::from(vec![continue_span, Span::raw("[x]close  [?]help")])
+                Line::from(Span::raw("[x]close  [r]estart  [?]help"))
             }
             RunnerTabState::Error(_) => Line::from(Span::styled(
                 "[x]close  [q]quit  [?]help",
