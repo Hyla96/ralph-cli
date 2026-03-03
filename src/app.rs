@@ -2471,6 +2471,45 @@ impl App {
                 if let Some(parser) = &mut self.synth_parser {
                     parser.process(summary.as_bytes());
                 }
+
+                // Post-synthesis outcome handling.
+                match exited_code {
+                    Some(Some(0)) => {
+                        // Exit code 0: attempt to load the synthesized prd.json.
+                        let workflow_name = self.synth_workflow_name.clone();
+                        if let Some(name) = workflow_name {
+                            let dir = self.store.workflow_dir(&name);
+                            match Workflow::load(&dir) {
+                                Ok(_) => {
+                                    // prd.json is valid — reload stories panel and show success.
+                                    self.load_current_workflow();
+                                    self.notification = Some((
+                                        "Synthesis complete".to_string(),
+                                        Instant::now(),
+                                    ));
+                                }
+                                Err(_) => {
+                                    // prd.json missing or unparseable.
+                                    self.status_message = Some(
+                                        "prd.json invalid after synthesis \u{2014} check log"
+                                            .to_string(),
+                                    );
+                                    self.status_message_expires = None; // persist until dismissed
+                                }
+                            }
+                        }
+                    }
+                    Some(Some(code)) => {
+                        // Non-zero exit: synthesis failed; do not touch prd.json.
+                        self.status_message = Some(format!(
+                            "Synthesis failed (exit {code}) \u{2014} check log"
+                        ));
+                        self.status_message_expires = None; // persist until dismissed
+                    }
+                    _ => {
+                        // Killed (Some(None)) or channel disconnected (None): no special action.
+                    }
+                }
             }
         }
     }
