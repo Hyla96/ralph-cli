@@ -1,6 +1,6 @@
 use crate::app::{
-    App, Dialog, PrdEditorField, PrdEditorMode, PrdEditorState, RunnerTab, RunnerTabState,
-    StoryDetailField,
+    App, Dialog, PrdEditorField, PrdEditorMode, PrdEditorState, PrdsFocus, RunnerTab,
+    RunnerTabState, StoryDetailField,
 };
 use crate::ralph::usage::UsageFile;
 use crate::ralph::workflow::Workflow;
@@ -30,6 +30,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let content = outer[1];
 
     if app.active_tab == 0 {
+        draw_prds_tab(frame, app, content);
+    } else if app.active_tab == 1 {
         draw_workflows_tab(frame, app, content);
     } else {
         draw_runner_tab(frame, app, content);
@@ -71,6 +73,83 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         None => {}
     }
+}
+
+/// Renders the PRDs tab: file list (left 30%) | content preview (right 70%) | status bar.
+fn draw_prds_tab(frame: &mut Frame, app: &App, area: Rect) {
+    // Vertical split: main content (flexible) | status bar (1 line)
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+
+    // Horizontal split: file list (30%) | content preview (70%)
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(vertical[0]);
+
+    let focused_style = Style::default().fg(Color::Yellow);
+
+    // Left pane: file list
+    let list_focused = app.prds_tab.focus == PrdsFocus::List;
+    let list_border_style = if list_focused {
+        focused_style
+    } else {
+        Style::default()
+    };
+    let list_title = format!("PRDs ({})", app.prds_tab.files.len());
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .title(list_title)
+        .border_style(list_border_style);
+
+    if app.prds_tab.files.is_empty() {
+        let empty_msg = Paragraph::new("No PRDs found in tasks/").block(list_block);
+        frame.render_widget(empty_msg, panes[0]);
+    } else {
+        let items: Vec<ListItem> = app
+            .prds_tab
+            .files
+            .iter()
+            .map(|name| ListItem::new(name.as_str()))
+            .collect();
+        let list = List::new(items)
+            .block(list_block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut list_state = ListState::default().with_selected(app.prds_tab.selected);
+        frame.render_stateful_widget(list, panes[0], &mut list_state);
+    }
+
+    // Right pane: content preview
+    let content_focused = app.prds_tab.focus == PrdsFocus::Content;
+    let content_border_style = if content_focused {
+        focused_style
+    } else {
+        Style::default()
+    };
+    let preview_title = app
+        .prds_tab
+        .selected
+        .and_then(|i| app.prds_tab.files.get(i))
+        .map(|s| s.as_str())
+        .unwrap_or("Preview");
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .title(preview_title)
+        .border_style(content_border_style);
+    let content_para = Paragraph::new(app.prds_tab.content.as_str())
+        .block(content_block)
+        .scroll((app.prds_tab.scroll, 0));
+    frame.render_widget(content_para, panes[1]);
+
+    // Status bar
+    let status_line = if app.prds_tab.focus == PrdsFocus::List {
+        "[j/↓] down  [k/↑] up  [Enter] preview  [Tab] switch tab  [q]uit"
+    } else {
+        "[j/↓] scroll down  [k/↑] scroll up  [Esc] back to list  [Tab] switch tab  [q]uit"
+    };
+    frame.render_widget(Paragraph::new(status_line), vertical[1]);
 }
 
 /// Renders the Workflows tab: workflow list (left) | tasks (right) | log panel | status bar.
@@ -258,7 +337,7 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
 ///
 /// Keyboard input is forwarded directly to the PTY as raw bytes (no input buffer row).
 fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
-    let tab = match app.runner_tabs.get(app.active_tab - 1) {
+    let tab = match app.runner_tabs.get(app.active_tab - 2) {
         Some(t) => t,
         None => return,
     };
@@ -437,7 +516,8 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Build the full list of (label, is_active, is_runner, is_done) entries up front.
     let mut entries: Vec<(String, bool, bool, bool)> = Vec::new();
 
-    entries.push((" [1] Workflows ".to_string(), app.active_tab == 0, false, false));
+    entries.push((" [1] PRDs ".to_string(), app.active_tab == 0, false, false));
+    entries.push((" [2] Workflows ".to_string(), app.active_tab == 1, false, false));
 
     for (i, tab) in app.runner_tabs.iter().enumerate() {
         let suffix = match &tab.state {
@@ -448,8 +528,8 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         };
         let is_done = matches!(tab.state, RunnerTabState::Done);
         entries.push((
-            format!(" [{}] {}{} ", i + 2, tab.workflow_name, suffix),
-            app.active_tab == i + 1,
+            format!(" [{}] {}{} ", i + 3, tab.workflow_name, suffix),
+            app.active_tab == i + 2,
             true,
             is_done,
         ));
