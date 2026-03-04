@@ -46,8 +46,8 @@ impl UsageFile {
             .with_context(|| format!("failed to write {}", usage_path.display()))
     }
 
-    /// Records a story's token usage, updating the total.
-    pub fn record_story(&mut self, task_id: &str, usage: TaskUsage) {
+    /// Records a task's token usage, updating the total.
+    pub fn record_task(&mut self, task_id: &str, usage: TaskUsage) {
         self.tasks.insert(task_id.to_string(), usage);
         // Recompute total as the sum of all entries.
         self.total = TaskUsage::default();

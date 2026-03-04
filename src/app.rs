@@ -55,16 +55,16 @@ pub struct RunnerTab {
     pub current_task_title: Option<String>,
     /// Number of iterations used for this runner tab (starts at 1, incremented by spawn_next_iteration).
     pub iterations_used: u32,
-    /// Accumulated input tokens for the current story.
-    pub current_story_input_tokens: u64,
-    /// Accumulated output tokens for the current story.
-    pub current_story_output_tokens: u64,
-    /// Accumulated cache read tokens for the current story.
-    pub current_story_cache_read_tokens: u64,
-    /// Accumulated cache write tokens for the current story.
-    pub current_story_cache_write_tokens: u64,
-    /// Estimated USD cost for the current story.
-    pub current_story_cost_usd: f64,
+    /// Accumulated input tokens for the current task.
+    pub current_task_input_tokens: u64,
+    /// Accumulated output tokens for the current task.
+    pub current_task_output_tokens: u64,
+    /// Accumulated cache read tokens for the current task.
+    pub current_task_cache_read_tokens: u64,
+    /// Accumulated cache write tokens for the current task.
+    pub current_task_cache_write_tokens: u64,
+    /// Estimated USD cost for the current task.
+    pub current_task_cost_usd: f64,
     /// When true, raw key input is forwarded to the PTY (Insert mode).
     /// When false, app shortcuts are active (Normal mode).
     pub insert_mode: bool,
@@ -110,9 +110,9 @@ pub enum SpecEditorField {
     ValidationCommands,
 }
 
-/// Which field of the story detail form currently has focus.
+/// Which field of the task detail form currently has focus.
 #[derive(Debug, Clone, PartialEq)]
-pub enum StoryDetailField {
+pub enum TaskDetailField {
     Id,
     Title,
     Description,
@@ -120,15 +120,15 @@ pub enum StoryDetailField {
     Criteria,
 }
 
-/// Which top-level section of the PRD editor is active.
+/// Which top-level section of the spec editor is active.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpecEditorMode {
     /// Focus is on the metadata fields (Project, Branch, Description).
     Metadata,
-    /// Focus is on the story list panel.
-    StoryList,
-    /// Focus is on the story detail form (fully implemented in US-003).
-    StoryDetail,
+    /// Focus is on the task list panel.
+    TaskList,
+    /// Focus is on the task detail form.
+    TaskDetail,
 }
 
 /// In-memory state for the full-screen plan-metadata editor.
@@ -142,15 +142,15 @@ pub struct SpecEditorState {
     pub focused_field: SpecEditorField,
     /// Which top-level section of the editor is active.
     pub mode: SpecEditorMode,
-    /// In-memory copy of all tasks; mutated by story list add/delete.
-    pub stories: Vec<Task>,
-    /// Index of the currently selected story in the story list.
-    /// When mode == StoryDetail, this is the index of the story being edited
-    /// (or None when is_new_story == true).
-    pub selected_story: Option<usize>,
-    /// True when StoryDetail was opened via [a] (new story) rather than Enter.
-    pub is_new_story: bool,
-    /// Some(idx) = delete confirmation prompt is shown for the story at that index.
+    /// In-memory copy of all tasks; mutated by task list add/delete.
+    pub tasks: Vec<Task>,
+    /// Index of the currently selected task in the task list.
+    /// When mode == TaskDetail, this is the index of the task being edited
+    /// (or None when is_new_task == true).
+    pub selected_task: Option<usize>,
+    /// True when TaskDetail was opened via [a] (new task) rather than Enter.
+    pub is_new_task: bool,
+    /// Some(idx) = delete confirmation prompt is shown for the task at that index.
     pub confirm_delete: Option<usize>,
     /// Transient error/status shown in the hint line; cleared on next keystroke.
     pub status: Option<String>,
@@ -158,17 +158,17 @@ pub struct SpecEditorState {
     pub validation_commands: Vec<String>,
     /// Index of the currently active validation command line (within validation_commands).
     pub validation_commands_cursor: usize,
-    // Story detail editing fields (valid when mode == StoryDetail; populated on entry).
-    pub story_id: String,
-    pub story_title: String,
-    pub story_description: String,
-    pub story_priority: String,
+    // Task detail editing fields (valid when mode == TaskDetail; populated on entry).
+    pub task_id: String,
+    pub task_title: String,
+    pub task_description: String,
+    pub task_priority: String,
     /// One string per criterion; may be empty when criteria list is empty.
-    pub story_criteria: Vec<String>,
-    /// Index of the currently active criterion line (within story_criteria).
-    pub story_criteria_cursor: usize,
-    /// Which field of the story detail form has focus.
-    pub story_focused_field: StoryDetailField,
+    pub task_criteria: Vec<String>,
+    /// Index of the currently active criterion line (within task_criteria).
+    pub task_criteria_cursor: usize,
+    /// Which field of the task detail form has focus.
+    pub task_focused_field: TaskDetailField,
 }
 
 /// Spawns `claude --agent ralph` inside a PTY and streams output lines back via `tx`.
@@ -1389,7 +1389,7 @@ impl App {
             }
         };
 
-        let selected_story = if workflow.data.tasks.is_empty() {
+        let selected_task = if workflow.data.tasks.is_empty() {
             None
         } else {
             Some(0)
@@ -1401,26 +1401,26 @@ impl App {
             description: workflow.data.description.clone(),
             focused_field: SpecEditorField::Project,
             mode: SpecEditorMode::Metadata,
-            stories: workflow.data.tasks.clone(),
-            selected_story,
-            is_new_story: false,
+            tasks: workflow.data.tasks.clone(),
+            selected_task,
+            is_new_task: false,
             confirm_delete: None,
             status: None,
             validation_commands: workflow.data.validation_commands.clone(),
             validation_commands_cursor: 0,
-            // Story detail fields — populated when entering StoryDetail mode.
-            story_id: String::new(),
-            story_title: String::new(),
-            story_description: String::new(),
-            story_priority: String::new(),
-            story_criteria: Vec::new(),
-            story_criteria_cursor: 0,
-            story_focused_field: StoryDetailField::Id,
+            // Task detail fields — populated when entering TaskDetail mode.
+            task_id: String::new(),
+            task_title: String::new(),
+            task_description: String::new(),
+            task_priority: String::new(),
+            task_criteria: Vec::new(),
+            task_criteria_cursor: 0,
+            task_focused_field: TaskDetailField::Id,
         });
     }
 
     /// Writes the current editor state back to workflows.json.
-    /// Saves project, branch, description, and the full stories list.
+    /// Saves project, branch, description, and the full task list.
     /// On success closes the editor; on error shows the message in the status line.
     fn save_spec_editor(&mut self) {
         // Clone the values we need before releasing the immutable borrow.
@@ -1430,7 +1430,7 @@ impl App {
                 e.project.clone(),
                 e.branch.clone(),
                 e.description.clone(),
-                e.stories.clone(),
+                e.tasks.clone(),
                 e.validation_commands.clone(),
             ),
             None => return,
@@ -1479,7 +1479,7 @@ impl App {
     /// Dispatch order:
     ///   1. Delete confirmation overlay (if active) — consumes all keys.
     ///   2. Global bindings: Esc (close / go back), Ctrl+S (save).
-    ///   3. Mode-specific handlers: Metadata, StoryList, StoryDetail.
+    ///   3. Mode-specific handlers: Metadata, TaskList, TaskDetail.
     fn handle_spec_editor_key(&mut self, key: KeyEvent) {
         // Extract mode and confirm_delete without holding a borrow.
         let (mode, confirm_delete) = match &self.spec_editor {
@@ -1492,11 +1492,11 @@ impl App {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(editor) = &mut self.spec_editor {
-                        editor.stories.remove(del_idx);
-                        editor.selected_story = if editor.stories.is_empty() {
+                        editor.tasks.remove(del_idx);
+                        editor.selected_task = if editor.tasks.is_empty() {
                             None
                         } else {
-                            Some(del_idx.min(editor.stories.len() - 1))
+                            Some(del_idx.min(editor.tasks.len() - 1))
                         };
                         editor.confirm_delete = None;
                         editor.status = None;
@@ -1515,21 +1515,21 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 match mode {
-                    // US-003: Esc from story detail returns to story list without saving.
-                    SpecEditorMode::StoryDetail => {
+                    // Esc from task detail returns to task list without saving.
+                    SpecEditorMode::TaskDetail => {
                         if let Some(editor) = &mut self.spec_editor {
-                            editor.mode = SpecEditorMode::StoryList;
+                            editor.mode = SpecEditorMode::TaskList;
                         }
                     }
-                    // Esc from metadata or story list closes the editor.
-                    SpecEditorMode::Metadata | SpecEditorMode::StoryList => {
+                    // Esc from metadata or task list closes the editor.
+                    SpecEditorMode::Metadata | SpecEditorMode::TaskList => {
                         self.spec_editor = None;
                     }
                 }
                 return;
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if mode == SpecEditorMode::StoryDetail {
+                if mode == SpecEditorMode::TaskDetail {
                     self.save_task_detail();
                 } else {
                     self.save_spec_editor();
@@ -1542,8 +1542,8 @@ impl App {
         // Mode-specific key handling.
         match mode {
             SpecEditorMode::Metadata => self.handle_spec_editor_metadata_key(key),
-            SpecEditorMode::StoryList => self.handle_spec_task_list_key(key),
-            SpecEditorMode::StoryDetail => self.handle_spec_task_detail_key(key),
+            SpecEditorMode::TaskList => self.handle_spec_task_list_key(key),
+            SpecEditorMode::TaskDetail => self.handle_spec_task_detail_key(key),
         }
     }
 
@@ -1578,8 +1578,8 @@ impl App {
                             editor.focused_field = SpecEditorField::ValidationCommands;
                         }
                         SpecEditorField::ValidationCommands => {
-                            // Advance past the last metadata field into the story list.
-                            editor.mode = SpecEditorMode::StoryList;
+                            // Advance past the last metadata field into the task list.
+                            editor.mode = SpecEditorMode::TaskList;
                         }
                     }
                 }
@@ -1588,8 +1588,8 @@ impl App {
                 if let Some(editor) = &mut self.spec_editor {
                     match editor.focused_field {
                         SpecEditorField::Project => {
-                            // Wrap backwards into the story list.
-                            editor.mode = SpecEditorMode::StoryList;
+                            // Wrap backwards into the task list.
+                            editor.mode = SpecEditorMode::TaskList;
                         }
                         SpecEditorField::Branch => editor.focused_field = SpecEditorField::Project,
                         SpecEditorField::Description => {
@@ -1672,75 +1672,75 @@ impl App {
         }
     }
 
-    /// Handles key events when the story list panel is active.
+    /// Handles key events when the task list panel is active.
     fn handle_spec_task_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(editor) = &mut self.spec_editor
-                    && let Some(sel) = editor.selected_story
+                    && let Some(sel) = editor.selected_task
                     && sel > 0
                 {
-                    editor.selected_story = Some(sel - 1);
+                    editor.selected_task = Some(sel - 1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(editor) = &mut self.spec_editor {
-                    let len = editor.stories.len();
-                    match editor.selected_story {
+                    let len = editor.tasks.len();
+                    match editor.selected_task {
                         Some(sel) if sel + 1 < len => {
-                            editor.selected_story = Some(sel + 1);
+                            editor.selected_task = Some(sel + 1);
                         }
                         None if len > 0 => {
-                            editor.selected_story = Some(0);
+                            editor.selected_task = Some(0);
                         }
                         _ => {}
                     }
                 }
             }
             KeyCode::Enter => {
-                // Populate story detail fields from the selected story and enter StoryDetail mode.
+                // Populate task detail fields from the selected task and enter TaskDetail mode.
                 if let Some(editor) = &mut self.spec_editor
-                    && let Some(sel) = editor.selected_story
-                    && let Some(story) = editor.stories.get(sel).cloned()
+                    && let Some(sel) = editor.selected_task
+                    && let Some(story) = editor.tasks.get(sel).cloned()
                 {
-                    editor.story_id = story.id;
-                    editor.story_title = story.title;
-                    editor.story_description = story.description;
-                    editor.story_priority = story.priority.to_string();
-                    editor.story_criteria = if story.acceptance_criteria.is_empty() {
+                    editor.task_id = story.id;
+                    editor.task_title = story.title;
+                    editor.task_description = story.description;
+                    editor.task_priority = story.priority.to_string();
+                    editor.task_criteria = if story.acceptance_criteria.is_empty() {
                         vec![String::new()]
                     } else {
                         story.acceptance_criteria
                     };
-                    editor.story_criteria_cursor = 0;
-                    editor.story_focused_field = StoryDetailField::Id;
-                    editor.is_new_story = false;
-                    editor.mode = SpecEditorMode::StoryDetail;
+                    editor.task_criteria_cursor = 0;
+                    editor.task_focused_field = TaskDetailField::Id;
+                    editor.is_new_task = false;
+                    editor.mode = SpecEditorMode::TaskDetail;
                     editor.status = None;
                 }
             }
             KeyCode::Char('a') => {
-                // Open an empty story detail form for a new story.
+                // Open an empty task detail form for a new task.
                 if let Some(editor) = &mut self.spec_editor {
-                    let next_num = editor.stories.len() + 1;
-                    editor.story_id = format!("US-{next_num:03}");
-                    editor.story_title = String::new();
-                    editor.story_description = String::new();
-                    editor.story_priority = next_num.to_string();
-                    editor.story_criteria = vec![String::new()];
-                    editor.story_criteria_cursor = 0;
-                    editor.story_focused_field = StoryDetailField::Id;
-                    editor.is_new_story = true;
-                    editor.mode = SpecEditorMode::StoryDetail;
+                    let next_num = editor.tasks.len() + 1;
+                    editor.task_id = format!("TASK-{next_num:03}");
+                    editor.task_title = String::new();
+                    editor.task_description = String::new();
+                    editor.task_priority = next_num.to_string();
+                    editor.task_criteria = vec![String::new()];
+                    editor.task_criteria_cursor = 0;
+                    editor.task_focused_field = TaskDetailField::Id;
+                    editor.is_new_task = true;
+                    editor.mode = SpecEditorMode::TaskDetail;
                     editor.status = None;
                 }
             }
             KeyCode::Char('x') => {
-                // Show delete confirmation for the currently selected story.
+                // Show delete confirmation for the currently selected task.
                 if let Some(editor) = &mut self.spec_editor
-                    && editor.selected_story.is_some()
+                    && editor.selected_task.is_some()
                 {
-                    editor.confirm_delete = editor.selected_story;
+                    editor.confirm_delete = editor.selected_task;
                 }
             }
             KeyCode::Tab => {
@@ -1761,7 +1761,7 @@ impl App {
         }
     }
 
-    /// Handles key events when the story detail form is active.
+    /// Handles key events when the task detail form is active.
     ///
     /// Field order (Tab): Id → Title → Description → Priority → Criteria → Id (wrap).
     /// BackTab reverses the order. Within the Criteria list, Up/Down move between lines,
@@ -1769,78 +1769,78 @@ impl App {
     fn handle_spec_task_detail_key(&mut self, key: KeyEvent) {
         // Clone focused field to avoid holding the borrow during the match.
         let focused = match &self.spec_editor {
-            Some(e) => e.story_focused_field.clone(),
+            Some(e) => e.task_focused_field.clone(),
             None => return,
         };
 
         match key.code {
             KeyCode::Tab => {
                 if let Some(editor) = &mut self.spec_editor {
-                    editor.story_focused_field = match editor.story_focused_field {
-                        StoryDetailField::Id => StoryDetailField::Title,
-                        StoryDetailField::Title => StoryDetailField::Description,
-                        StoryDetailField::Description => StoryDetailField::Priority,
-                        StoryDetailField::Priority => StoryDetailField::Criteria,
-                        StoryDetailField::Criteria => StoryDetailField::Id,
+                    editor.task_focused_field = match editor.task_focused_field {
+                        TaskDetailField::Id => TaskDetailField::Title,
+                        TaskDetailField::Title => TaskDetailField::Description,
+                        TaskDetailField::Description => TaskDetailField::Priority,
+                        TaskDetailField::Priority => TaskDetailField::Criteria,
+                        TaskDetailField::Criteria => TaskDetailField::Id,
                     };
                 }
             }
             KeyCode::BackTab => {
                 if let Some(editor) = &mut self.spec_editor {
-                    editor.story_focused_field = match editor.story_focused_field {
-                        StoryDetailField::Id => StoryDetailField::Criteria,
-                        StoryDetailField::Title => StoryDetailField::Id,
-                        StoryDetailField::Description => StoryDetailField::Title,
-                        StoryDetailField::Priority => StoryDetailField::Description,
-                        StoryDetailField::Criteria => StoryDetailField::Priority,
+                    editor.task_focused_field = match editor.task_focused_field {
+                        TaskDetailField::Id => TaskDetailField::Criteria,
+                        TaskDetailField::Title => TaskDetailField::Id,
+                        TaskDetailField::Description => TaskDetailField::Title,
+                        TaskDetailField::Priority => TaskDetailField::Description,
+                        TaskDetailField::Criteria => TaskDetailField::Priority,
                     };
                 }
             }
-            KeyCode::Up if focused == StoryDetailField::Criteria => {
+            KeyCode::Up if focused == TaskDetailField::Criteria => {
                 if let Some(editor) = &mut self.spec_editor
-                    && editor.story_criteria_cursor > 0
+                    && editor.task_criteria_cursor > 0
                 {
-                    editor.story_criteria_cursor -= 1;
+                    editor.task_criteria_cursor -= 1;
                 }
             }
-            KeyCode::Down if focused == StoryDetailField::Criteria => {
+            KeyCode::Down if focused == TaskDetailField::Criteria => {
                 if let Some(editor) = &mut self.spec_editor {
-                    let max = editor.story_criteria.len().saturating_sub(1);
-                    if editor.story_criteria_cursor < max {
-                        editor.story_criteria_cursor += 1;
+                    let max = editor.task_criteria.len().saturating_sub(1);
+                    if editor.task_criteria_cursor < max {
+                        editor.task_criteria_cursor += 1;
                     }
                 }
             }
-            KeyCode::Enter if focused == StoryDetailField::Criteria => {
+            KeyCode::Enter if focused == TaskDetailField::Criteria => {
                 if let Some(editor) = &mut self.spec_editor {
-                    if editor.story_criteria.is_empty() {
-                        editor.story_criteria.push(String::new());
-                        editor.story_criteria_cursor = 0;
+                    if editor.task_criteria.is_empty() {
+                        editor.task_criteria.push(String::new());
+                        editor.task_criteria_cursor = 0;
                     } else {
-                        let cursor = editor.story_criteria_cursor;
-                        editor.story_criteria.insert(cursor + 1, String::new());
-                        editor.story_criteria_cursor = cursor + 1;
+                        let cursor = editor.task_criteria_cursor;
+                        editor.task_criteria.insert(cursor + 1, String::new());
+                        editor.task_criteria_cursor = cursor + 1;
                     }
                 }
             }
             KeyCode::Backspace => {
                 if let Some(editor) = &mut self.spec_editor {
-                    match editor.story_focused_field {
-                        StoryDetailField::Id => {
-                            editor.story_id.pop();
+                    match editor.task_focused_field {
+                        TaskDetailField::Id => {
+                            editor.task_id.pop();
                         }
-                        StoryDetailField::Title => {
-                            editor.story_title.pop();
+                        TaskDetailField::Title => {
+                            editor.task_title.pop();
                         }
-                        StoryDetailField::Description => {
-                            editor.story_description.pop();
+                        TaskDetailField::Description => {
+                            editor.task_description.pop();
                         }
-                        StoryDetailField::Priority => {
-                            editor.story_priority.pop();
+                        TaskDetailField::Priority => {
+                            editor.task_priority.pop();
                         }
-                        StoryDetailField::Criteria => {
-                            let cursor = editor.story_criteria_cursor;
-                            if let Some(line) = editor.story_criteria.get_mut(cursor) {
+                        TaskDetailField::Criteria => {
+                            let cursor = editor.task_criteria_cursor;
+                            if let Some(line) = editor.task_criteria.get_mut(cursor) {
                                 line.pop();
                             }
                         }
@@ -1852,28 +1852,28 @@ impl App {
                 if let Some(editor) = &mut self.spec_editor {
                     // x in the Criteria field deletes the focused criterion line.
                     if c == 'x'
-                        && editor.story_focused_field == StoryDetailField::Criteria
-                        && !editor.story_criteria.is_empty()
+                        && editor.task_focused_field == TaskDetailField::Criteria
+                        && !editor.task_criteria.is_empty()
                     {
-                        let cursor = editor.story_criteria_cursor;
-                        editor.story_criteria.remove(cursor);
-                        editor.story_criteria_cursor = if editor.story_criteria.is_empty() {
+                        let cursor = editor.task_criteria_cursor;
+                        editor.task_criteria.remove(cursor);
+                        editor.task_criteria_cursor = if editor.task_criteria.is_empty() {
                             0
                         } else {
-                            cursor.min(editor.story_criteria.len() - 1)
+                            cursor.min(editor.task_criteria.len() - 1)
                         };
                     } else {
-                        match editor.story_focused_field {
-                            StoryDetailField::Id => editor.story_id.push(c),
-                            StoryDetailField::Title => editor.story_title.push(c),
-                            StoryDetailField::Description => editor.story_description.push(c),
-                            StoryDetailField::Priority => editor.story_priority.push(c),
-                            StoryDetailField::Criteria => {
-                                if editor.story_criteria.is_empty() {
-                                    editor.story_criteria.push(c.to_string());
+                        match editor.task_focused_field {
+                            TaskDetailField::Id => editor.task_id.push(c),
+                            TaskDetailField::Title => editor.task_title.push(c),
+                            TaskDetailField::Description => editor.task_description.push(c),
+                            TaskDetailField::Priority => editor.task_priority.push(c),
+                            TaskDetailField::Criteria => {
+                                if editor.task_criteria.is_empty() {
+                                    editor.task_criteria.push(c.to_string());
                                 } else {
-                                    let cursor = editor.story_criteria_cursor;
-                                    if let Some(line) = editor.story_criteria.get_mut(cursor) {
+                                    let cursor = editor.task_criteria_cursor;
+                                    if let Some(line) = editor.task_criteria.get_mut(cursor) {
                                         line.push(c);
                                     }
                                 }
@@ -1887,38 +1887,38 @@ impl App {
         }
     }
 
-    /// Saves the story detail form back into the in-memory story list, then persists
-    /// the full plan (metadata + all stories) to workflows.json.  Returns to StoryList mode
+    /// Saves the task detail form back into the in-memory task list, then persists
+    /// the full plan (metadata + all tasks) to workflows.json.  Returns to TaskList mode
     /// on success; shows an error in the hint line on failure.
     fn save_task_detail(&mut self) {
-        // Build the Task from story detail fields (clone to release the borrow).
+        // Build the Task from task detail fields (clone to release the borrow).
         let (workflow_name, task, project, branch, description, is_new, selected_idx) = {
             let editor = match &self.spec_editor {
                 Some(e) => e,
                 None => return,
             };
-            let priority = editor.story_priority.parse::<u32>().unwrap_or(1);
+            let priority = editor.task_priority.parse::<u32>().unwrap_or(1);
             // Drop empty criterion lines before saving.
             let criteria: Vec<String> = editor
-                .story_criteria
+                .task_criteria
                 .iter()
                 .filter(|s| !s.is_empty())
                 .cloned()
                 .collect();
-            // Preserve passes / notes from the original story when editing.
-            let (passes, notes) = if editor.is_new_story {
+            // Preserve passes / notes from the original task when editing.
+            let (passes, notes) = if editor.is_new_task {
                 (false, String::new())
             } else {
                 editor
-                    .selected_story
-                    .and_then(|i| editor.stories.get(i))
+                    .selected_task
+                    .and_then(|i| editor.tasks.get(i))
                     .map(|s| (s.passes, s.notes.clone()))
                     .unwrap_or((false, String::new()))
             };
             let task = Task {
-                id: editor.story_id.clone(),
-                title: editor.story_title.clone(),
-                description: editor.story_description.clone(),
+                id: editor.task_id.clone(),
+                title: editor.task_title.clone(),
+                description: editor.task_description.clone(),
                 acceptance_criteria: criteria,
                 priority,
                 passes,
@@ -1930,29 +1930,29 @@ impl App {
                 editor.project.clone(),
                 editor.branch.clone(),
                 editor.description.clone(),
-                editor.is_new_story,
-                editor.selected_story,
+                editor.is_new_task,
+                editor.selected_task,
             )
         };
 
-        // Update the in-memory story list and switch back to StoryList mode.
+        // Update the in-memory task list and switch back to TaskList mode.
         if let Some(editor) = &mut self.spec_editor {
             if is_new {
-                editor.stories.push(task.clone());
-                let new_idx = editor.stories.len() - 1;
-                editor.selected_story = Some(new_idx);
+                editor.tasks.push(task.clone());
+                let new_idx = editor.tasks.len() - 1;
+                editor.selected_task = Some(new_idx);
             } else if let Some(idx) = selected_idx
-                && let Some(existing) = editor.stories.get_mut(idx)
+                && let Some(existing) = editor.tasks.get_mut(idx)
             {
                 *existing = task.clone();
             }
-            editor.mode = SpecEditorMode::StoryList;
+            editor.mode = SpecEditorMode::TaskList;
             editor.status = None;
         }
 
-        // Persist updated metadata + stories to disk.
+        // Persist updated metadata + tasks to disk.
         let updated_stories = match &self.spec_editor {
-            Some(e) => e.stories.clone(),
+            Some(e) => e.tasks.clone(),
             None => return,
         };
 
@@ -2375,17 +2375,17 @@ impl App {
             }
         } // rx borrow released
 
-        // Accumulate token and cost totals for the current story.
+        // Accumulate token and cost totals for the current task.
         for (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd) in token_usages {
-            self.runner_tabs[tab_idx].current_story_input_tokens =
-                self.runner_tabs[tab_idx].current_story_input_tokens.saturating_add(input_tokens);
-            self.runner_tabs[tab_idx].current_story_output_tokens =
-                self.runner_tabs[tab_idx].current_story_output_tokens.saturating_add(output_tokens);
-            self.runner_tabs[tab_idx].current_story_cache_read_tokens =
-                self.runner_tabs[tab_idx].current_story_cache_read_tokens.saturating_add(cache_read_tokens);
-            self.runner_tabs[tab_idx].current_story_cache_write_tokens =
-                self.runner_tabs[tab_idx].current_story_cache_write_tokens.saturating_add(cache_write_tokens);
-            self.runner_tabs[tab_idx].current_story_cost_usd += cost_usd;
+            self.runner_tabs[tab_idx].current_task_input_tokens =
+                self.runner_tabs[tab_idx].current_task_input_tokens.saturating_add(input_tokens);
+            self.runner_tabs[tab_idx].current_task_output_tokens =
+                self.runner_tabs[tab_idx].current_task_output_tokens.saturating_add(output_tokens);
+            self.runner_tabs[tab_idx].current_task_cache_read_tokens =
+                self.runner_tabs[tab_idx].current_task_cache_read_tokens.saturating_add(cache_read_tokens);
+            self.runner_tabs[tab_idx].current_task_cache_write_tokens =
+                self.runner_tabs[tab_idx].current_task_cache_write_tokens.saturating_add(cache_write_tokens);
+            self.runner_tabs[tab_idx].current_task_cost_usd += cost_usd;
         }
 
         // Feed raw bytes into the vt100 parser.
@@ -2470,16 +2470,16 @@ impl App {
                     let task_id = tab.current_task_id.clone();
                     let workflow_dir = self.store.workflow_dir(&workflow_name);
                     let task_usage = TaskUsage {
-                        input_tokens: tab.current_story_input_tokens,
-                        output_tokens: tab.current_story_output_tokens,
-                        cache_read_tokens: tab.current_story_cache_read_tokens,
-                        cache_write_tokens: tab.current_story_cache_write_tokens,
-                        estimated_cost_usd: tab.current_story_cost_usd,
+                        input_tokens: tab.current_task_input_tokens,
+                        output_tokens: tab.current_task_output_tokens,
+                        cache_read_tokens: tab.current_task_cache_read_tokens,
+                        cache_write_tokens: tab.current_task_cache_write_tokens,
+                        estimated_cost_usd: tab.current_task_cost_usd,
                     };
                     if let Some(task_id) = task_id {
                         match UsageFile::load(&workflow_dir) {
                             Ok(mut usage_file) => {
-                                usage_file.record_story(&task_id, task_usage);
+                                usage_file.record_task(&task_id, task_usage);
                                 let _ = usage_file.save(&workflow_dir);
                             }
                             Err(_) => {
@@ -2825,11 +2825,11 @@ impl App {
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = 1;
-            tab.current_story_input_tokens = 0;
-            tab.current_story_output_tokens = 0;
-            tab.current_story_cache_read_tokens = 0;
-            tab.current_story_cache_write_tokens = 0;
-            tab.current_story_cost_usd = 0.0;
+            tab.current_task_input_tokens = 0;
+            tab.current_task_output_tokens = 0;
+            tab.current_task_cache_read_tokens = 0;
+            tab.current_task_cache_write_tokens = 0;
+            tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
             self.active_tab = reuse + 2; // active_tab is 2-indexed for runner tabs (0=PRDs, 1=Workflows)
@@ -2846,11 +2846,11 @@ impl App {
                 current_task_id,
                 current_task_title,
                 iterations_used: 1,
-                current_story_input_tokens: 0,
-                current_story_output_tokens: 0,
-                current_story_cache_read_tokens: 0,
-                current_story_cache_write_tokens: 0,
-                current_story_cost_usd: 0.0,
+                current_task_input_tokens: 0,
+                current_task_output_tokens: 0,
+                current_task_cache_read_tokens: 0,
+                current_task_cache_write_tokens: 0,
+                current_task_cost_usd: 0.0,
                 insert_mode: false,
                 saw_complete: false,
             };
@@ -2928,11 +2928,11 @@ impl App {
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = 1;
-            tab.current_story_input_tokens = 0;
-            tab.current_story_output_tokens = 0;
-            tab.current_story_cache_read_tokens = 0;
-            tab.current_story_cache_write_tokens = 0;
-            tab.current_story_cost_usd = 0.0;
+            tab.current_task_input_tokens = 0;
+            tab.current_task_output_tokens = 0;
+            tab.current_task_cache_read_tokens = 0;
+            tab.current_task_cache_write_tokens = 0;
+            tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
         }
@@ -2991,11 +2991,11 @@ impl App {
 
         if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
             // Reset token and cost fields at the start of a new iteration.
-            tab.current_story_input_tokens = 0;
-            tab.current_story_output_tokens = 0;
-            tab.current_story_cache_read_tokens = 0;
-            tab.current_story_cache_write_tokens = 0;
-            tab.current_story_cost_usd = 0.0;
+            tab.current_task_input_tokens = 0;
+            tab.current_task_output_tokens = 0;
+            tab.current_task_cache_read_tokens = 0;
+            tab.current_task_cache_write_tokens = 0;
+            tab.current_task_cost_usd = 0.0;
             tab.saw_complete = false;
             tab.runner_rx = Some(rx);
             tab.runner_kill_tx = Some(kill_tx);

@@ -1,6 +1,6 @@
 use crate::app::{
     App, Dialog, SpecEditorField, SpecEditorMode, SpecEditorState, SpecsFocus, RunnerTab,
-    RunnerTabState, StoryDetailField,
+    RunnerTabState, TaskDetailField,
 };
 use crate::ralph::usage::UsageFile;
 use crate::ralph::workflow::Workflow;
@@ -387,7 +387,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
             let token_str = match state {
                 RunnerTabState::Running { .. } => {
                     let task_tokens =
-                        tab.current_story_input_tokens + tab.current_story_output_tokens;
+                        tab.current_task_input_tokens + tab.current_task_output_tokens;
                     match UsageFile::load(&workflow_dir) {
                         Ok(usage) => {
                             let session_tokens =
@@ -627,7 +627,7 @@ fn runner_tab_context(app: &App, tab: &RunnerTab) -> Option<String> {
 
     let token_str = match &tab.state {
         RunnerTabState::Running { .. } => {
-            let task_tokens = tab.current_story_input_tokens + tab.current_story_output_tokens;
+            let task_tokens = tab.current_task_input_tokens + tab.current_task_output_tokens;
             match UsageFile::load(&workflow_dir) {
                 Ok(usage) => {
                     let session_tokens =
@@ -859,8 +859,8 @@ fn draw_runner_help_dialog(frame: &mut Frame, area: Rect) {
 /// Renders the full-screen PRD editor.
 ///
 /// Dispatches to the appropriate sub-renderer based on the active mode:
-///   - StoryDetail: placeholder panel (to be fleshed out in US-003)
-///   - Metadata / StoryList: three metadata fields + story list below
+///   - TaskDetail: placeholder panel (to be fleshed out in US-003)
+///   - Metadata / TaskList: three metadata fields + task list below
 fn draw_spec_editor(frame: &mut Frame, editor: &SpecEditorState, area: Rect) {
     let title = format!(" PRD Editor: {} ", editor.workflow_name);
     let outer_block = Block::default().borders(Borders::ALL).title(title);
@@ -868,14 +868,14 @@ fn draw_spec_editor(frame: &mut Frame, editor: &SpecEditorState, area: Rect) {
     frame.render_widget(outer_block, area);
 
     match editor.mode {
-        SpecEditorMode::StoryDetail => draw_spec_task_detail(frame, editor, inner_area),
-        SpecEditorMode::Metadata | SpecEditorMode::StoryList => {
-            draw_spec_metadata_and_stories(frame, editor, inner_area);
+        SpecEditorMode::TaskDetail => draw_spec_task_detail(frame, editor, inner_area),
+        SpecEditorMode::Metadata | SpecEditorMode::TaskList => {
+            draw_spec_metadata_and_tasks(frame, editor, inner_area);
         }
     }
 }
 
-/// Renders the metadata fields (Project / Branch / Description) and the story list below.
+/// Renders the metadata fields (Project / Branch / Description) and the task list below.
 ///
 /// Layout (inside the outer border):
 ///   Project field   — 3 rows (bordered)
@@ -885,7 +885,7 @@ fn draw_spec_editor(frame: &mut Frame, editor: &SpecEditorState, area: Rect) {
 ///   hint / status   — 1 row
 ///
 /// Active section border is highlighted yellow; focused metadata field shows `_` cursor.
-fn draw_spec_metadata_and_stories(frame: &mut Frame, editor: &SpecEditorState, area: Rect) {
+fn draw_spec_metadata_and_tasks(frame: &mut Frame, editor: &SpecEditorState, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -994,8 +994,8 @@ fn draw_spec_metadata_and_stories(frame: &mut Frame, editor: &SpecEditorState, a
     }
 
     // Stories list panel
-    let stories_focused = editor.mode == SpecEditorMode::StoryList;
-    let stories_title = format!("Stories ({})", editor.stories.len());
+    let stories_focused = editor.mode == SpecEditorMode::TaskList;
+    let stories_title = format!("Stories ({})", editor.tasks.len());
     let stories_block = Block::default()
         .borders(Borders::ALL)
         .title(stories_title)
@@ -1005,12 +1005,12 @@ fn draw_spec_metadata_and_stories(frame: &mut Frame, editor: &SpecEditorState, a
             Style::default()
         });
 
-    if editor.stories.is_empty() {
+    if editor.tasks.is_empty() {
         let msg = Paragraph::new("No stories. Press [a] to add one.").block(stories_block);
         frame.render_widget(msg, layout[4]);
     } else {
         let items: Vec<ListItem> = editor
-            .stories
+            .tasks
             .iter()
             .enumerate()
             .map(|(i, story)| {
@@ -1021,19 +1021,19 @@ fn draw_spec_metadata_and_stories(frame: &mut Frame, editor: &SpecEditorState, a
         let list = List::new(items)
             .block(stories_block)
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-        let mut list_state = ListState::default().with_selected(editor.selected_story);
+        let mut list_state = ListState::default().with_selected(editor.selected_task);
         frame.render_stateful_widget(list, layout[4], &mut list_state);
     }
 
     // Hint / status line
     let hint = if let Some(del_idx) = editor.confirm_delete {
-        let story_id = editor
-            .stories
+        let task_id = editor
+            .tasks
             .get(del_idx)
             .map(|s| s.id.as_str())
             .unwrap_or("?");
         Line::from(Span::styled(
-            format!("Delete story {story_id}? [y/N]"),
+            format!("Delete story {task_id}? [y/N]"),
             Style::default().fg(Color::Yellow),
         ))
     } else if let Some(err) = &editor.status {
@@ -1048,7 +1048,7 @@ fn draw_spec_metadata_and_stories(frame: &mut Frame, editor: &SpecEditorState, a
     frame.render_widget(Paragraph::new(hint), layout[5]);
 }
 
-/// Renders the story detail form (US-003).
+/// Renders the task detail form.
 ///
 /// Layout (inside the outer border from draw_spec_editor):
 ///   ID (60%) + Priority (40%)   — 3 rows, side-by-side
@@ -1080,7 +1080,7 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
         .split(layout[0]);
 
     // ID field
-    let id_focused = editor.story_focused_field == StoryDetailField::Id;
+    let id_focused = editor.task_focused_field == TaskDetailField::Id;
     let id_block = Block::default()
         .borders(Borders::ALL)
         .title("ID")
@@ -1090,14 +1090,14 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
             Style::default()
         });
     let id_text = if id_focused {
-        format!("{}_", editor.story_id)
+        format!("{}_", editor.task_id)
     } else {
-        editor.story_id.clone()
+        editor.task_id.clone()
     };
     frame.render_widget(Paragraph::new(id_text).block(id_block), top_row[0]);
 
     // Priority field
-    let prio_focused = editor.story_focused_field == StoryDetailField::Priority;
+    let prio_focused = editor.task_focused_field == TaskDetailField::Priority;
     let prio_block = Block::default()
         .borders(Borders::ALL)
         .title("Priority")
@@ -1107,14 +1107,14 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
             Style::default()
         });
     let prio_text = if prio_focused {
-        format!("{}_", editor.story_priority)
+        format!("{}_", editor.task_priority)
     } else {
-        editor.story_priority.clone()
+        editor.task_priority.clone()
     };
     frame.render_widget(Paragraph::new(prio_text).block(prio_block), top_row[1]);
 
     // --- Title field ---
-    let title_focused = editor.story_focused_field == StoryDetailField::Title;
+    let title_focused = editor.task_focused_field == TaskDetailField::Title;
     let title_block = Block::default()
         .borders(Borders::ALL)
         .title("Title")
@@ -1124,14 +1124,14 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
             Style::default()
         });
     let title_text = if title_focused {
-        format!("{}_", editor.story_title)
+        format!("{}_", editor.task_title)
     } else {
-        editor.story_title.clone()
+        editor.task_title.clone()
     };
     frame.render_widget(Paragraph::new(title_text).block(title_block), layout[1]);
 
     // --- Description field ---
-    let desc_focused = editor.story_focused_field == StoryDetailField::Description;
+    let desc_focused = editor.task_focused_field == TaskDetailField::Description;
     let desc_block = Block::default()
         .borders(Borders::ALL)
         .title("Description")
@@ -1141,14 +1141,14 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
             Style::default()
         });
     let desc_text = if desc_focused {
-        format!("{}_", editor.story_description)
+        format!("{}_", editor.task_description)
     } else {
-        editor.story_description.clone()
+        editor.task_description.clone()
     };
     frame.render_widget(Paragraph::new(desc_text).block(desc_block), layout[2]);
 
     // --- Acceptance Criteria list ---
-    let crit_focused = editor.story_focused_field == StoryDetailField::Criteria;
+    let crit_focused = editor.task_focused_field == TaskDetailField::Criteria;
     let crit_block = Block::default()
         .borders(Borders::ALL)
         .title("Acceptance Criteria  [Enter] add  [x] delete  [↑↓] navigate")
@@ -1158,7 +1158,7 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
             Style::default()
         });
 
-    if editor.story_criteria.is_empty() {
+    if editor.task_criteria.is_empty() {
         let msg = if crit_focused {
             "  (empty — press Enter to add a criterion)"
         } else {
@@ -1166,9 +1166,9 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
         };
         frame.render_widget(Paragraph::new(msg).block(crit_block), layout[3]);
     } else {
-        let cursor = editor.story_criteria_cursor;
+        let cursor = editor.task_criteria_cursor;
         let items: Vec<ListItem> = editor
-            .story_criteria
+            .task_criteria
             .iter()
             .enumerate()
             .map(|(i, crit)| {
