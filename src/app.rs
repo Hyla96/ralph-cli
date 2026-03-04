@@ -680,16 +680,39 @@ fn strip_ansi(s: &str) -> String {
     result
 }
 
+/// Which pane of the PRDs tab has keyboard focus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrdsFocus {
+    List,
+    Content,
+}
+
+/// State for the PRDs read-only tab.
+pub struct PrdsTab {
+    /// Filenames (not full paths) of `.md` files found in `tasks/`, sorted alphabetically.
+    pub files: Vec<String>,
+    /// Index of the currently selected file, or `None` when the list is empty.
+    pub selected: Option<usize>,
+    /// Full text content of the selected file.
+    pub content: String,
+    /// Scroll offset (lines from top) for the content pane.
+    pub scroll: u16,
+    /// Which pane currently has keyboard focus.
+    pub focus: PrdsFocus,
+}
+
 pub struct App {
     pub running: bool,
     pub store: Store,
     pub workflows: Vec<String>,
     pub selected_workflow: Option<usize>,
     pub current_workflow: Option<Workflow>,
-    /// All open runner tabs (tab 0 is the Workflows tab, not stored here).
+    /// All open runner tabs (tab 0 is the PRDs tab, tab 1 is the Workflows tab).
     pub runner_tabs: Vec<RunnerTab>,
-    /// 0 = Workflows tab; 1..=runner_tabs.len() = runner tab at index active_tab-1.
+    /// 0 = PRDs tab; 1 = Workflows tab; 2..=1+runner_tabs.len() = runner tab at index active_tab-2.
     pub active_tab: usize,
+    /// State for the PRDs tab.
+    pub prds_tab: PrdsTab,
     /// When true the next keypress is interpreted as a tab navigation chord.
     pub tab_nav_pending: bool,
     pub dialog: Option<Dialog>,
@@ -746,6 +769,13 @@ impl App {
             current_workflow: None,
             runner_tabs: Vec::new(),
             active_tab: 0,
+            prds_tab: PrdsTab {
+                files: Vec::new(),
+                selected: None,
+                content: String::new(),
+                scroll: 0,
+                focus: PrdsFocus::List,
+            },
             tab_nav_pending: false,
             dialog: None,
             status_message: watcher_warning,
@@ -833,15 +863,37 @@ impl App {
                     self.tab_nav_pending = false;
                     self.handle_tab_nav_key(key.code);
                 } else if self.active_tab == 0 {
+                    // PRDs tab keybindings (stub — full navigation added in later tasks).
+                    match key.code {
+                        KeyCode::Char('t') => self.tab_nav_pending = true,
+                        KeyCode::Tab => {
+                            let total_tabs = 2 + self.runner_tabs.len();
+                            self.active_tab = (self.active_tab + 1) % total_tabs;
+                        }
+                        KeyCode::BackTab => {
+                            let total_tabs = 2 + self.runner_tabs.len();
+                            self.active_tab = if self.active_tab == 0 {
+                                total_tabs - 1
+                            } else {
+                                self.active_tab - 1
+                            };
+                        }
+                        KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.running = false;
+                        }
+                        _ => {}
+                    }
+                } else if self.active_tab == 1 {
                     // Workflows tab keybindings.
                     match key.code {
                         KeyCode::Char('t') => self.tab_nav_pending = true,
                         KeyCode::Tab => {
-                            let total_tabs = 1 + self.runner_tabs.len();
+                            let total_tabs = 2 + self.runner_tabs.len();
                             self.active_tab = (self.active_tab + 1) % total_tabs;
                         }
                         KeyCode::BackTab => {
-                            let total_tabs = 1 + self.runner_tabs.len();
+                            let total_tabs = 2 + self.runner_tabs.len();
                             self.active_tab = if self.active_tab == 0 {
                                 total_tabs - 1
                             } else {
@@ -881,7 +933,7 @@ impl App {
                 } else {
                     // Runner tab keybindings.
                     // Read insert_mode via copy before any mutable borrow to avoid borrow conflicts.
-                    let tab_idx = self.active_tab - 1;
+                    let tab_idx = self.active_tab - 2;
                     let insert_mode = self
                         .runner_tabs
                         .get(tab_idx)
@@ -1005,8 +1057,8 @@ impl App {
                                         Some(Instant::now() + Duration::from_secs(2));
                                 } else if self.runner_tabs.get(tab_idx).is_some() {
                                     self.runner_tabs.remove(tab_idx);
-                                    // Move to the previous tab; saturating_sub(1) gives 0 (Workflows)
-                                    // when active_tab was 1 (the only runner tab).
+                                    // Move to the previous tab; saturating_sub(1) gives 1 (Workflows)
+                                    // when active_tab was 2 (the only runner tab).
                                     self.active_tab = self.active_tab.saturating_sub(1);
                                 }
                             }
@@ -1036,11 +1088,11 @@ impl App {
                                 }
                             }
                             KeyCode::Tab => {
-                                let total_tabs = 1 + self.runner_tabs.len();
+                                let total_tabs = 2 + self.runner_tabs.len();
                                 self.active_tab = (self.active_tab + 1) % total_tabs;
                             }
                             KeyCode::BackTab => {
-                                let total_tabs = 1 + self.runner_tabs.len();
+                                let total_tabs = 2 + self.runner_tabs.len();
                                 self.active_tab = if self.active_tab == 0 {
                                     total_tabs - 1
                                 } else {
@@ -1060,10 +1112,10 @@ impl App {
 
     /// Handles the second key of a `t`-prefix tab navigation chord.
     ///
-    /// Digits `1`–`9` jump to the tab at index `digit − 1` (0 = Workflows).
+    /// Digits `1`–`9` jump to the tab at index `digit − 1` (0 = PRDs, 1 = Workflows, 2+ = runners).
     /// Any other key is silently ignored (flag was already cleared by the caller).
     fn handle_tab_nav_key(&mut self, code: KeyCode) {
-        let total_tabs = 1 + self.runner_tabs.len(); // Workflows tab + runner tabs
+        let total_tabs = 2 + self.runner_tabs.len(); // PRDs tab + Workflows tab + runner tabs
         match code {
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 let idx = (c as usize) - ('1' as usize); // digit '1' → 0, '9' → 8
@@ -2110,8 +2162,8 @@ impl App {
             let next_id_clone = next_id.clone();
 
             // Find the workflow name for the active runner tab.
-            let tab_workflow_name = (self.active_tab > 0)
-                .then(|| self.runner_tabs.get(self.active_tab - 1))
+            let tab_workflow_name = (self.active_tab > 1)
+                .then(|| self.runner_tabs.get(self.active_tab - 2))
                 .flatten()
                 .map(|t| t.workflow_name.clone());
 
@@ -2133,8 +2185,8 @@ impl App {
 
             if !task_still_pending {
                 self.dialog = None;
-                if self.active_tab > 0
-                    && let Some(tab) = self.runner_tabs.get_mut(self.active_tab - 1)
+                if self.active_tab > 1
+                    && let Some(tab) = self.runner_tabs.get_mut(self.active_tab - 2)
                     && matches!(tab.state, RunnerTabState::Running { .. })
                 {
                     tab.state = RunnerTabState::Done;
@@ -2576,10 +2628,10 @@ impl App {
     }
 
     fn stop_runner(&mut self) {
-        if self.active_tab == 0 {
+        if self.active_tab <= 1 {
             return;
         }
-        let tab_idx = self.active_tab - 1;
+        let tab_idx = self.active_tab - 2;
         let Some(tab) = self.runner_tabs.get_mut(tab_idx) else {
             return;
         };
@@ -2660,7 +2712,7 @@ impl App {
             tab.current_story_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
-            self.active_tab = reuse + 1; // active_tab is 1-indexed for runner tabs
+            self.active_tab = reuse + 2; // active_tab is 2-indexed for runner tabs (0=PRDs, 1=Workflows)
         } else {
             let tab = RunnerTab {
                 workflow_name: name,
@@ -2683,7 +2735,7 @@ impl App {
                 saw_complete: false,
             };
             self.runner_tabs.push(tab);
-            self.active_tab = self.runner_tabs.len(); // runner tabs are 1-indexed in active_tab
+            self.active_tab = 1 + self.runner_tabs.len(); // runner tabs are 2-indexed in active_tab (0=PRDs, 1=Workflows)
         }
 
         self.resize_txs.push(resize_tx);
@@ -2701,10 +2753,10 @@ impl App {
     /// Spawns the next claude iteration on the active runner tab.
     /// Increments the current iteration counter and starts a new subprocess.
     fn spawn_next_iteration(&mut self) {
-        if self.active_tab == 0 {
+        if self.active_tab <= 1 {
             return;
         }
-        self.spawn_next_iteration_at(self.active_tab - 1);
+        self.spawn_next_iteration_at(self.active_tab - 2);
     }
 
     /// Restarts the runner for a tab currently in `Stopped` state.

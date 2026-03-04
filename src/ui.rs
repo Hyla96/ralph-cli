@@ -30,6 +30,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let content = outer[1];
 
     if app.active_tab == 0 {
+        draw_prds_tab(frame, app, content);
+    } else if app.active_tab == 1 {
         draw_workflows_tab(frame, app, content);
     } else {
         draw_runner_tab(frame, app, content);
@@ -71,6 +73,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         None => {}
     }
+}
+
+/// Stub renderer for the PRDs tab. Replaced by a real implementation in a later task.
+fn draw_prds_tab(frame: &mut Frame, _app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("PRDs");
+    frame.render_widget(block, area);
 }
 
 /// Renders the Workflows tab: workflow list (left) | tasks (right) | log panel | status bar.
@@ -258,7 +266,7 @@ fn draw_workflows_tab(frame: &mut Frame, app: &App, area: Rect) {
 ///
 /// Keyboard input is forwarded directly to the PTY as raw bytes (no input buffer row).
 fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
-    let tab = match app.runner_tabs.get(app.active_tab - 1) {
+    let tab = match app.runner_tabs.get(app.active_tab - 2) {
         Some(t) => t,
         None => return,
     };
@@ -437,7 +445,8 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Build the full list of (label, is_active, is_runner, is_done) entries up front.
     let mut entries: Vec<(String, bool, bool, bool)> = Vec::new();
 
-    entries.push((" [1] Workflows ".to_string(), app.active_tab == 0, false, false));
+    entries.push((" [1] PRDs ".to_string(), app.active_tab == 0, false, false));
+    entries.push((" [2] Workflows ".to_string(), app.active_tab == 1, false, false));
 
     for (i, tab) in app.runner_tabs.iter().enumerate() {
         let suffix = match &tab.state {
@@ -448,8 +457,8 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         };
         let is_done = matches!(tab.state, RunnerTabState::Done);
         entries.push((
-            format!(" [{}] {}{} ", i + 2, tab.workflow_name, suffix),
-            app.active_tab == i + 1,
+            format!(" [{}] {}{} ", i + 3, tab.workflow_name, suffix),
+            app.active_tab == i + 2,
             true,
             is_done,
         ));
