@@ -864,7 +864,7 @@ impl App {
                     self.tab_nav_pending = false;
                     self.handle_tab_nav_key(key.code);
                 } else if self.active_tab == 0 {
-                    // PRDs tab keybindings (stub — full navigation added in later tasks).
+                    // PRDs tab keybindings.
                     match key.code {
                         KeyCode::Char('t') => self.tab_nav_pending = true,
                         KeyCode::Tab => {
@@ -883,7 +883,34 @@ impl App {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.running = false;
                         }
-                        _ => {}
+                        _ => match self.prds_tab.focus {
+                            PrdsFocus::List => match key.code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if !self.prds_tab.files.is_empty() {
+                                        let next = match self.prds_tab.selected {
+                                            None => 0,
+                                            Some(i) => (i + 1) % self.prds_tab.files.len(),
+                                        };
+                                        self.select_prds_file(next);
+                                    }
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if !self.prds_tab.files.is_empty() {
+                                        let prev = match self.prds_tab.selected {
+                                            None => 0,
+                                            Some(0) => self.prds_tab.files.len() - 1,
+                                            Some(i) => i - 1,
+                                        };
+                                        self.select_prds_file(prev);
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    self.prds_tab.focus = PrdsFocus::Content;
+                                }
+                                _ => {}
+                            },
+                            PrdsFocus::Content => {}
+                        },
                     }
                 } else if self.active_tab == 1 {
                     // Workflows tab keybindings.
@@ -2110,6 +2137,20 @@ impl App {
             self.prds_tab.scroll = 0;
             self.prds_tab.files = files;
         }
+    }
+
+    /// Selects the file at `idx` in `prds_tab.files`, loads its content from disk,
+    /// and resets the scroll offset to 0.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds for `prds_tab.files`.
+    fn select_prds_file(&mut self, idx: usize) {
+        let tasks_dir = self.store.root().join("tasks");
+        let path = tasks_dir.join(&self.prds_tab.files[idx]);
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        self.prds_tab.selected = Some(idx);
+        self.prds_tab.content = content;
+        self.prds_tab.scroll = 0;
     }
 
     /// Returns `true` if all tasks in the named workflow have `passes == true`.
