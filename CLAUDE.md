@@ -4,18 +4,18 @@
 
 Use `just` as the task runner. Run `just` with no arguments to list all recipes.
 
-| Recipe | Command |
-|---|---|
-| `just build` | `cargo build` |
-| `just release` | `cargo build --release` |
-| `just check` | build + clippy (matches prd.json validationCommands) |
-| `just lint` | `cargo clippy -- -D warnings` |
-| `just test` | `cargo test` |
-| `just run` | `cargo run` |
-| `just fmt` | `cargo fmt` |
-| `just fmt-check` | `cargo fmt -- --check` |
-| `just fix` | `cargo clippy --fix --allow-staged` |
-| `just clean` | `cargo clean` |
+| Recipe           | Command                                              |
+| ---------------- | ---------------------------------------------------- |
+| `just build`     | `cargo build`                                        |
+| `just release`   | `cargo build --release`                              |
+| `just check`     | build + clippy (matches prd.json validationCommands) |
+| `just lint`      | `cargo clippy -- -D warnings`                        |
+| `just test`      | `cargo test`                                         |
+| `just run`       | `cargo run`                                          |
+| `just fmt`       | `cargo fmt`                                          |
+| `just fmt-check` | `cargo fmt -- --check`                               |
+| `just fix`       | `cargo clippy --fix --allow-staged`                  |
+| `just clean`     | `cargo clean`                                        |
 
 The PRD validation commands (`cargo build` and `cargo clippy -- -D warnings`) are covered by `just check`.
 

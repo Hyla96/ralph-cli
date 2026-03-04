@@ -792,6 +792,7 @@ impl App {
             synth_workflow_name: None,
         };
         app.load_current_workflow();
+        app.load_prds_files();
         app
     }
 
@@ -891,6 +892,9 @@ impl App {
                         KeyCode::Tab => {
                             let total_tabs = 2 + self.runner_tabs.len();
                             self.active_tab = (self.active_tab + 1) % total_tabs;
+                            if self.active_tab == 0 {
+                                self.load_prds_files();
+                            }
                         }
                         KeyCode::BackTab => {
                             let total_tabs = 2 + self.runner_tabs.len();
@@ -899,6 +903,9 @@ impl App {
                             } else {
                                 self.active_tab - 1
                             };
+                            if self.active_tab == 0 {
+                                self.load_prds_files();
+                            }
                         }
                         KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1090,6 +1097,9 @@ impl App {
                             KeyCode::Tab => {
                                 let total_tabs = 2 + self.runner_tabs.len();
                                 self.active_tab = (self.active_tab + 1) % total_tabs;
+                                if self.active_tab == 0 {
+                                    self.load_prds_files();
+                                }
                             }
                             KeyCode::BackTab => {
                                 let total_tabs = 2 + self.runner_tabs.len();
@@ -1098,6 +1108,8 @@ impl App {
                                 } else {
                                     self.active_tab - 1
                                 };
+                                // Runner BackTab can never reach 0 (runner index >= 2),
+                                // so no load_prds_files call needed here.
                             }
                             // Normal mode: unrecognized keys are ignored (use Insert mode to type freely).
                             _ => {}
@@ -1121,6 +1133,9 @@ impl App {
                 let idx = (c as usize) - ('1' as usize); // digit '1' → 0, '9' → 8
                 if idx < total_tabs {
                     self.active_tab = idx;
+                    if idx == 0 {
+                        self.load_prds_files();
+                    }
                 }
             }
             _ => {} // any other key: flag already cleared, no tab change
@@ -2060,6 +2075,41 @@ impl App {
             let dir = self.store.workflow_dir(name);
             Workflow::load(&dir).ok()
         });
+    }
+
+    /// Scans `<repo_root>/tasks/` for `.md` files and populates `prds_tab`.
+    ///
+    /// - Files are sorted alphabetically by filename.
+    /// - If the directory does not exist or contains no `.md` files, `files` is
+    ///   empty and `selected` is `None`.
+    /// - If files are present, `selected` defaults to `Some(0)` and `content` is
+    ///   set to the full text of the first file; `scroll` is reset to 0.
+    pub fn load_prds_files(&mut self) {
+        let tasks_dir = self.store.root().join("tasks");
+        let mut files: Vec<String> = match std::fs::read_dir(&tasks_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path().extension().and_then(|s| s.to_str()) == Some("md")
+                })
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_owned()))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        files.sort();
+
+        if files.is_empty() {
+            self.prds_tab.files = files;
+            self.prds_tab.selected = None;
+            self.prds_tab.content = String::new();
+        } else {
+            let first_path = tasks_dir.join(&files[0]);
+            let content = std::fs::read_to_string(&first_path).unwrap_or_default();
+            self.prds_tab.selected = Some(0);
+            self.prds_tab.content = content;
+            self.prds_tab.scroll = 0;
+            self.prds_tab.files = files;
+        }
     }
 
     /// Returns `true` if all tasks in the named workflow have `passes == true`.
