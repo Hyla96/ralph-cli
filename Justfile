@@ -52,7 +52,6 @@ clean:
 # Copy agents and skills into ~/.claude
 set-resources:
     cp -rf ./resources/ ~/.claude/
-    rm -rf ~/.claude/skills/prd-synth/
 
 # Installs this app as `ralph-tui` command
 install:
