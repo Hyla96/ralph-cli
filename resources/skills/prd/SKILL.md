@@ -1,12 +1,12 @@
 ---
 name: prd
-description: "Generate a Product Requirements Document (PRD) for a new feature. Use when planning a feature, starting a new project, or when asked to create a PRD. Triggers on: create a prd, write prd for, plan this feature, requirements for, spec out."
+description: "Generate a draft Product Requirements Document (PRD) for a new feature with research markers. Use when planning a feature, starting a new project, or when asked to create a PRD. Triggers on: create a prd, write prd for, plan this feature, requirements for, spec out."
 user-invocable: true
 ---
 
 # PRD Generator
 
-Create detailed Product Requirements Documents that are clear, actionable, and suitable for implementation.
+Create draft Product Requirements Documents that are clear, actionable, and include research markers for the prd-researcher agent to fill in.
 
 ---
 
@@ -14,10 +14,10 @@ Create detailed Product Requirements Documents that are clear, actionable, and s
 
 1. Receive a feature description from the user
 2. Ask as many essential clarifying questions (with lettered options) as needed
-3. Generate a structured PRD based on answers
+3. Generate a structured **draft** PRD based on answers, with research markers
 4. Save to `tasks/prd-[feature-name].md`
 
-**Important:** Do NOT start implementing. Just create the PRD.
+**Important:** Do NOT start implementing. Just create the draft PRD. The prd-researcher agent will enrich it with research findings before finalization.
 
 ---
 
@@ -58,7 +58,7 @@ This lets users respond with "1A, 2C, 3B" for quick iteration. Remember to inden
 
 ## Step 2: PRD Structure
 
-Generate the PRD with these sections:
+Generate the PRD with these sections. This is a **draft** PRD — sections 3 and 4 are preliminary and will be refined after research.
 
 ### 1. Introduction/Overview
 
@@ -68,7 +68,9 @@ Brief description of the feature and the problem it solves.
 
 Specific, measurable objectives (bullet list).
 
-### 3. User Stories
+### 3. User Stories [DRAFT]
+
+Mark the section heading as `## User Stories [DRAFT]` in the output.
 
 Each task needs:
 
@@ -98,7 +100,9 @@ Each task should be small enough to implement in one focused session.
 - Acceptance criteria must be verifiable, not vague. "Works correctly" is bad. "Button shows confirmation dialog before deleting" is good.
 - **For any task with UI changes:** Always include "Verify in browser using dev-browser skill" as acceptance criteria. This ensures visual verification of frontend work.
 
-### 4. Functional Requirements
+### 4. Functional Requirements [DRAFT]
+
+Mark the section heading as `## Functional Requirements [DRAFT]` in the output.
 
 Numbered list of specific functionalities:
 
@@ -133,6 +137,55 @@ How will success be measured?
 ### 9. Open Questions
 
 Remaining questions or areas needing clarification.
+
+### 10. Research Needed
+
+List specific topics the prd-researcher agent should investigate. Include:
+
+- Best practices and patterns for the problem domain
+- Libraries or dependencies that might be relevant
+- How competitors or similar projects handle this
+- Existing codebase patterns or modules that relate to this feature
+
+**Format in the output PRD:**
+
+```markdown
+## Research Needed
+
+- [ ] Best practices for [specific topic]
+- [ ] Evaluate libraries/dependencies for [specific need]
+- [ ] How do [competitors/similar tools] handle [feature]?
+- [ ] Analyze existing codebase: [specific modules/patterns to examine]
+- [ ] [Any other research topics relevant to this feature]
+```
+
+Each item should be specific enough that a researcher agent knows exactly what to look for.
+
+### 11. Research Findings
+
+Add an empty section with the following subsections. The prd-researcher agent will fill these in.
+
+**Format in the output PRD:**
+
+```markdown
+## Research Findings
+
+### Best Practices
+
+_To be filled by prd-researcher agent._
+
+### Library/Dependency Analysis
+
+_To be filled by prd-researcher agent._
+
+### Competitive Analysis
+
+_To be filled by prd-researcher agent._
+
+### Codebase Analysis
+
+_To be filled by prd-researcher agent._
+```
 
 ---
 
@@ -172,7 +225,7 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 - Enable filtering and sorting by priority
 - Default new tasks to medium priority
 
-## User Stories
+## User Stories [DRAFT]
 
 ### US-001: Add priority field to database
 
@@ -219,7 +272,7 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 - [ ] Typecheck passes
 - [ ] Verify in browser using dev-browser skill
 
-## Functional Requirements
+## Functional Requirements [DRAFT]
 
 - FR-1: Add `priority` field to tasks table ('high' | 'medium' | 'low', default 'medium')
 - FR-2: Display colored priority badge on each task card
@@ -249,6 +302,31 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 
 - Should priority affect task ordering within a column?
 - Should we add keyboard shortcuts for priority changes?
+
+## Research Needed
+
+- [ ] Best practices for priority systems in task management UIs
+- [ ] Evaluate UI component libraries for priority badge/indicator patterns
+- [ ] How do Todoist, Linear, and Asana handle task priority?
+- [ ] Analyze existing codebase: task card component, list filtering, database schema
+
+## Research Findings
+
+### Best Practices
+
+_To be filled by prd-researcher agent._
+
+### Library/Dependency Analysis
+
+_To be filled by prd-researcher agent._
+
+### Competitive Analysis
+
+_To be filled by prd-researcher agent._
+
+### Codebase Analysis
+
+_To be filled by prd-researcher agent._
 ```
 
 ---
@@ -260,6 +338,10 @@ Before saving the PRD:
 - [ ] Asked clarifying questions with lettered options
 - [ ] Incorporated user's answers
 - [ ] User stories are small and specific
+- [ ] User Stories section heading includes `[DRAFT]` marker
 - [ ] Functional requirements are numbered and unambiguous
+- [ ] Functional Requirements section heading includes `[DRAFT]` marker
 - [ ] Non-goals section defines clear boundaries
+- [ ] `## Research Needed` section lists specific topics for the researcher agent
+- [ ] `## Research Findings` section present with empty subsections (Best Practices, Library/Dependency Analysis, Competitive Analysis, Codebase Analysis)
 - [ ] Saved to `tasks/prd-[feature-name].md`
