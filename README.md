@@ -26,10 +26,10 @@ Workflows live inside the repository under `.ralph/workflows/`:
 .ralph/
 └── workflows/
     └── <workflow-name>/
-        └── prd.json      # tasks, validation commands, branch name
+        └── workflows.json      # tasks, validation commands, branch name
 ```
 
-### prd.json schema
+### workflows.json schema
 
 ```json
 {
@@ -66,7 +66,7 @@ Workflows live inside the repository under `.ralph/workflows/`:
 | `r`            | Run selected workflow (opens a new runner tab) |
 | `s`            | Stop the runner for the selected workflow      |
 | `n`            | Open "New workflow" dialog                     |
-| `e`            | Edit `prd.json` in `$EDITOR`                   |
+| `e`            | Edit `workflows.json` in `$EDITOR`                   |
 | `d`            | Delete selected workflow (with confirmation)   |
 | `?`            | Open help overlay                              |
 | `t` + chord    | Navigate tabs (see below)                      |
@@ -100,7 +100,7 @@ Press `t`, then:
 
 ## Getting Started
 
-ralph-tui is a Rust TUI that manages the Ralph agent loop. Ralph is a Claude Code agent that reads a `prd.json` workflow file, implements one task at a time, runs validation, and commits the result. ralph-tui is the controller: it discovers workflows in a git repo, lets you start and stop agent loops, and streams the live output. You bring the repo and the task spec; ralph-tui and Ralph take care of the rest.
+ralph-tui is a Rust TUI that manages the Ralph agent loop. Ralph is a Claude Code agent that reads a `workflows.json` workflow file, implements one task at a time, runs validation, and commits the result. ralph-tui is the controller: it discovers workflows in a git repo, lets you start and stop agent loops, and streams the live output. You bring the repo and the task spec; ralph-tui and Ralph take care of the rest.
 
 ### Step 1 — Prerequisites
 
@@ -134,7 +134,7 @@ git checkout <branch-name>
 just set-resources
 ```
 
-This copies the `/prd` and `/prd-synth` skills and the `ralph` agent into `~/.claude/`, making them available to Claude Code.
+This copies the `/spec` and `/spec-synth` skills and the `ralph` agent into `~/.claude/`, making them available to Claude Code.
 
 ### Step 4 — Install the binary
 
@@ -152,9 +152,9 @@ This runs `cargo install --path .` and installs the `ralph-tui` binary on your `
 mkdir my-project && cd my-project && git init && git commit --allow-empty -m 'init'
 ```
 
-### Step 6 — Generate a workflow with `/prd`
+### Step 6 — Generate a workflow with `/spec`
 
-Open a Claude Code session inside your sandbox repo and run the `/prd` skill to describe the feature you want to build:
+Open a Claude Code session inside your sandbox repo and run the `/spec` skill to describe the feature you want to build:
 
 ```sh
 claude
@@ -163,20 +163,20 @@ claude
 Inside the Claude Code session:
 
 ```
-/prd We need a feature that shows token usage for ralph usage in this TUI
+/spec We need a feature that shows token usage for ralph usage in this TUI
 ```
 
 Claude will walk you through refining the spec.
 
-### Step 7 — Synthesize `prd.json` with `/prd-synth`
+### Step 7 — Synthesize `workflows.json` with `/spec-synth`
 
 In the same Claude Code session, run:
 
 ```
-/prd-synth
+/spec-synth
 ```
 
-This emits `.ralph/workflows/<name>/prd.json` containing the structured task list.
+This emits `.ralph/workflows/<name>/workflows.json` containing the structured task list.
 
 ### Step 8 — Exit Claude and launch ralph-tui
 
@@ -217,7 +217,7 @@ just clean        # cargo clean
 just              # list all recipes
 ```
 
-`just check` runs the same commands as `prd.json`'s `validationCommands`.
+`just check` runs the same commands as `workflows.json`'s `validationCommands`.
 
 To watch logs while debugging:
 
@@ -239,13 +239,13 @@ src/
 └── ralph/
     ├── mod.rs         # module declarations
     ├── store.rs       # Store — git root detection, .ralph/workflows/ management
-    ├── workflow.rs    # Workflow, PrdJson, Task — prd.json I/O
+    ├── workflow.rs    # Workflow, WorkflowJson, Task — workflows.json I/O
     └── runner.rs      # RunnerEvent — event types for subprocess streaming
 ```
 
 **`store.rs`** — `Store::find(path)` walks up from any path to find the git root. All workflow directory paths go through `Store` methods.
 
-**`workflow.rs`** — `Workflow::load(dir)` deserializes `prd.json`. `Workflow::save(dir)` writes it back. Helper methods: `done_count()`, `total_count()`, `next_task()`, `is_complete()`.
+**`workflow.rs`** — `Workflow::load(dir)` deserializes `workflows.json`. `Workflow::save(dir)` writes it back. Helper methods: `done_count()`, `total_count()`, `next_task()`, `is_complete()`.
 
 ### Key dependencies
 
@@ -253,7 +253,7 @@ src/
 | ---------------------- | -------------------------------------- |
 | `ratatui`              | Terminal UI framework                  |
 | `crossterm`            | Cross-platform terminal backend        |
-| `serde` + `serde_json` | prd.json serialization                 |
+| `serde` + `serde_json` | workflows.json serialization           |
 | `anyhow`               | Error handling                         |
 | `tokio`                | Async runtime for subprocess streaming |
 | `clap`                 | CLI argument parsing                   |
@@ -262,7 +262,7 @@ src/
 
 ## Running the Ralph agent
 
-The Ralph agent prompt and instructions live in `.claude/` and are loaded by `claude --agent ralph`. The agent reads the highest-priority incomplete task from `prd.json`, implements it, runs validation, and sets `passes: true` before committing.
+The Ralph agent prompt and instructions live in `.claude/` and are loaded by `claude --agent ralph`. The agent reads the highest-priority incomplete task from `workflows.json`, implements it, runs validation, and sets `passes: true` before committing.
 
 Each invocation handles exactly one task. The runner loop re-invokes the agent until all tasks are complete or it receives `RALPH_SENTINEL_COMPLETE` in the output.
 
@@ -275,9 +275,9 @@ The original implementation lives in `scripts/ralph/` and still works:
 ```sh
 # Run the ralph loop (interactive, prompts between tasks)
 ./scripts/ralph/ralph.sh [max_iterations]
-./scripts/ralph/ralph.sh -f path/to/prd.json [max_iterations]
+./scripts/ralph/ralph.sh -f path/to/workflows.json [max_iterations]
 
-# Print task progress for the current prd.json
+# Print task progress for the current workflows.json
 ./scripts/ralph/ralph-status.sh
 ```
 
