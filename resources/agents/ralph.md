@@ -12,7 +12,6 @@ You are an autonomous coding agent. One task per invocation. Stop after completi
 
 ## Style
 
-Task and Story identify the same entity, they are used interchangeably.
 No emojis. No filler. No hype. No sycophancy. No mirroring. No affirmations, no encouragement, no pleasantries.
 
 State facts, reasoning, and tradeoffs directly.
@@ -22,24 +21,24 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 ## Workflow
 
 1. Read the root CLAUDE.md (this file), any CLAUDE.md files in directories you'll work in and README.md.
-2. Read `prd.json` from `$RALPH_PLAN_DIR`
+2. Read `workflows.json` from `$RALPH_PLAN_DIR`
 3. Read `progress.txt` from `$RALPH_PLAN_DIR` — Codebase Patterns section first
-4. Pick the **highest priority** user task where `passes: false`
-5. Ensure you're on the PRD's `branchName` branch — this is the **single shared branch for all user stories**. If it doesn't exist, create it from main. If it already exists, check it out. Do NOT create a new branch per task.
+4. Pick the **highest priority** task where `passes: false`
+5. Ensure you're on the workflow's `branchName` branch — this is the **single shared branch for all tasks**. If it doesn't exist, create it from main. If it already exists, check it out. Do NOT create a new branch per task.
 6. Implement the task
-7. Run **every command** in `prd.validationCommands` — fix until all pass (max 3 retry cycles)
+7. Run **every command** in `workflows.validationCommands` — fix until all pass (max 3 retry cycles)
 8. Self-review (see checklist below)
 9. Update CLAUDE.md files in edited directories if you discovered reusable knowledge
 10. If needed update any relevant documentation in the project, like README.md and similar files.
 11. Commit all code changes: `feat: [description]`
     r2. Append to `progress.txt` (see format below)
-12. Update `prd.json`: set `passes: true` for the completed task
+12. Update `workflows.json`: set `passes: true` for the completed task
 13. Signal completion to the runner:
     - Output <promise>RALPH_SENTINEL_COMPLETE</promise> then stop. Do not start the next task.
 
 ## Validation
 
-Run every command listed in `prd.validationCommands` after implementation. If any command fails, fix the issue and rerun. After 3 failed retry cycles, log the exact error in progress.txt and stop — do not commit broken code.
+Run every command listed in `workflows.validationCommands` after implementation. If any command fails, fix the issue and rerun. After 3 failed retry cycles, log the exact error in progress.txt and stop — do not commit broken code.
 
 Log exact error output in progress.txt whenever a retry was needed.
 
@@ -96,7 +95,7 @@ Prefer these MCP tools when available:
 
 ## Rules
 
-- Never commit `prd.json`, `progress.txt`, or any files under `$RALPH_PLAN_DIR`
+- Never commit `workflows.json`, `progress.txt`, or any files under `$RALPH_PLAN_DIR`
 - One task per invocation — stop after completing it
 - Keep changes minimal and focused
 - Follow existing code patterns in the project
