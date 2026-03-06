@@ -553,7 +553,7 @@ async fn synth_task(
     let _ = tx.send(RunnerEvent::Exited(exit_code));
 }
 
-/// Spawns `claude --dangerously-skip-permissions <skill>` inside a PTY.
+/// Spawns `claude [--dangerously-skip-permissions] <skill>` inside a PTY.
 /// Modelled on `runner_task` but without the token-line scanner.
 /// Environment variables in `env` are set on the child process via `cmd.env()`.
 #[allow(clippy::too_many_arguments)]
@@ -566,6 +566,7 @@ async fn spec_op_task(
     mut stdin_rx: UnboundedReceiver<Vec<u8>>,
     size: (u16, u16),
     resize_rx: UnboundedReceiver<(u16, u16)>,
+    skip_permissions: bool,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -594,7 +595,10 @@ async fn spec_op_task(
     };
 
     let mut cmd = CommandBuilder::new("claude");
-    cmd.args(["--dangerously-skip-permissions", &skill]);
+    if skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+    cmd.arg(&skill);
     cmd.cwd(&cwd);
     for (k, v) in &env {
         cmd.env(k, v);
@@ -3304,6 +3308,7 @@ impl App {
             stdin_rx,
             (cols, pty_rows),
             resize_rx,
+            self.config.dangerously_skip_permissions,
         )));
     }
 
