@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 
+use super::config::RalphConfig;
+
 pub struct Store {
     root: PathBuf,
 }
@@ -95,6 +97,35 @@ impl Store {
         }
         name.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+
+    /// Returns `<root>/.ralph/ralph.config.json`.
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join(".ralph").join("ralph.config.json")
+    }
+
+    /// Reads and deserialises the config file.
+    /// Returns `RalphConfig::default()` when the file is absent or malformed.
+    pub fn load_config(&self) -> RalphConfig {
+        let path = self.config_path();
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return RalphConfig::default();
+        };
+        serde_json::from_str(&contents).unwrap_or_default()
+    }
+
+    /// Serialises and writes the config file, creating parent dirs if needed.
+    pub fn save_config(&self, config: &RalphConfig) -> Result<()> {
+        let path = self.config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
+        }
+        let json = serde_json::to_string_pretty(config)
+            .with_context(|| "failed to serialise RalphConfig")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("failed to write config file: {}", path.display()))?;
+        Ok(())
     }
 
     /// Returns the repo root path.

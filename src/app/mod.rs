@@ -10,6 +10,7 @@ use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use vt100::Parser as VtParser;
 
+use crate::ralph::RalphConfig;
 use crate::ralph::runner::RunnerEvent;
 use crate::ralph::store::Store;
 use crate::ralph::usage::{TaskUsage, UsageFile};
@@ -171,9 +172,15 @@ pub struct SpecEditorState {
     pub task_focused_field: TaskDetailField,
 }
 
+/// State for the full-screen configuration page.
+pub struct ConfigScreen {
+    pub selected_row: usize,
+}
+
 /// Spawns `claude --agent ralph` inside a PTY and streams output lines back via `tx`.
 /// Listens on `kill_rx` for an early termination signal.
 /// Lines received on `stdin_rx` are forwarded (with a trailing `\n`) to the PTY stdin.
+#[allow(clippy::too_many_arguments)]
 async fn runner_task(
     plan_dir: PathBuf,
     repo_root: PathBuf,
@@ -182,6 +189,7 @@ async fn runner_task(
     mut stdin_rx: UnboundedReceiver<Vec<u8>>,
     size: (u16, u16),
     resize_rx: UnboundedReceiver<(u16, u16)>,
+    skip_permissions: bool,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -211,6 +219,9 @@ async fn runner_task(
     };
 
     let mut cmd = CommandBuilder::new("claude");
+    if skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
     cmd.args(["--agent", "ralph", "Implement the next task."]);
     cmd.cwd(&repo_root);
     cmd.env("RALPH_PLAN_DIR", &plan_dir);
@@ -398,6 +409,7 @@ async fn synth_task(
     kill_rx: oneshot::Receiver<()>,
     size: (u16, u16),
     resize_rx: UnboundedReceiver<(u16, u16)>,
+    skip_permissions: bool,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -425,7 +437,10 @@ async fn synth_task(
     };
 
     let mut cmd = CommandBuilder::new("claude");
-    cmd.args(["--dangerously-skip-permissions", "/spec-synth"]);
+    if skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+    cmd.arg("/spec-synth");
     cmd.cwd(&workflow_dir);
 
     let mut child = match pair.slave.spawn_command(cmd) {
@@ -734,6 +749,9 @@ pub struct App {
     /// When `Some`, the full-screen spec editor is active.
     /// All key input is routed to the editor; normal TUI is hidden.
     pub spec_editor: Option<SpecEditorState>,
+    /// When `Some`, the full-screen configuration page is active.
+    /// All key input is routed to the config screen; normal TUI is hidden.
+    pub config_screen: Option<ConfigScreen>,
     /// VT100 parser for synthesis subprocess output.
     /// `None` until the first synthesis has been started.
     pub synth_parser: Option<VtParser>,
@@ -743,12 +761,17 @@ pub struct App {
     pub synth_kill_tx: Option<oneshot::Sender<()>>,
     /// Name of the workflow currently being (or last) synthesized.
     pub synth_workflow_name: Option<String>,
+    /// Loaded project configuration (from `.ralph/ralph.config.json`).
+    pub config: RalphConfig,
 }
 
 impl App {
     pub fn new(store: Store, initial_size: (u16, u16)) -> Self {
         let workflows = store.list_workflows();
         let selected_workflow = if workflows.is_empty() { None } else { Some(0) };
+
+        // Load config before `store` is moved into the App struct.
+        let config = store.load_config();
 
         // Capture the root path before `store` is moved into the App struct.
         let root = store.root().to_path_buf();
@@ -786,10 +809,12 @@ impl App {
             _watcher: watcher_opt,
             notification: None,
             spec_editor: None,
+            config_screen: None,
             synth_parser: None,
             synth_rx: None,
             synth_kill_tx: None,
             synth_workflow_name: None,
+            config,
         };
         app.load_current_workflow();
         app.load_specs_files();
@@ -863,6 +888,22 @@ impl App {
                     // Consume the chord: always clear the flag, then act.
                     self.tab_nav_pending = false;
                     self.handle_tab_nav_key(key.code);
+                } else if self.config_screen.is_some() {
+                    // Config screen: Esc or plain 'c' closes it; Space/Enter toggles.
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.config_screen = None;
+                        }
+                        KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                            self.config_screen = None;
+                        }
+                        KeyCode::Char(' ') | KeyCode::Enter => {
+                            self.config.dangerously_skip_permissions =
+                                !self.config.dangerously_skip_permissions;
+                            let _ = self.store.save_config(&self.config);
+                        }
+                        _ => {}
+                    }
                 } else if self.active_tab == 0 {
                     // Specs tab keybindings.
                     match key.code {
@@ -882,6 +923,9 @@ impl App {
                         KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.running = false;
+                        }
+                        KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                            self.config_screen = Some(ConfigScreen { selected_row: 0 });
                         }
                         _ => match self.specs_tab.focus {
                             SpecsFocus::List => match key.code {
@@ -959,6 +1003,9 @@ impl App {
                         KeyCode::Char('q') => self.dialog = Some(Dialog::QuitConfirm),
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.running = false;
+                        }
+                        KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                            self.config_screen = Some(ConfigScreen { selected_row: 0 });
                         }
                         KeyCode::Up | KeyCode::Char('k') => self.move_up(),
                         KeyCode::Down | KeyCode::Char('j') => self.move_down(),
@@ -2618,6 +2665,7 @@ impl App {
             kill_rx,
             (cols, pty_rows),
             resize_rx,
+            self.config.dangerously_skip_permissions,
         )));
     }
 
@@ -2867,6 +2915,7 @@ impl App {
             stdin_rx,
             (cols, pty_rows),
             resize_rx,
+            self.config.dangerously_skip_permissions,
         )));
     }
 
@@ -2946,6 +2995,7 @@ impl App {
             stdin_rx,
             (cols, pty_rows),
             resize_rx,
+            self.config.dangerously_skip_permissions,
         )));
     }
 
@@ -3018,6 +3068,7 @@ impl App {
             stdin_rx,
             (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
             resize_rx,
+            self.config.dangerously_skip_permissions,
         )));
     }
 }

@@ -1,7 +1,8 @@
 use crate::app::{
-    App, Dialog, SpecEditorField, SpecEditorMode, SpecEditorState, SpecsFocus, RunnerTab,
-    RunnerTabState, TaskDetailField,
+    App, ConfigScreen, Dialog, SpecEditorField, SpecEditorMode, SpecEditorState, SpecsFocus,
+    RunnerTab, RunnerTabState, TaskDetailField,
 };
+use crate::ralph::RalphConfig;
 use crate::ralph::usage::UsageFile;
 use crate::ralph::workflow::Workflow;
 use ratatui::{
@@ -16,6 +17,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Full-screen spec editor takes over the entire frame.
     if let Some(editor) = &app.spec_editor {
         draw_spec_editor(frame, editor, frame.area());
+        return;
+    }
+
+    // Full-screen config screen takes over the entire frame.
+    if let Some(config_screen) = &app.config_screen {
+        draw_config_screen(frame, config_screen, &app.config, frame.area());
         return;
     }
 
@@ -1194,4 +1201,54 @@ fn draw_spec_task_detail(frame: &mut Frame, editor: &SpecEditorState, area: Rect
         Line::from("[Tab] next field  [Shift+Tab] prev  [Ctrl+S] save  [Esc] back")
     };
     frame.render_widget(Paragraph::new(hint), layout[4]);
+}
+
+/// Renders the full-screen configuration page.
+///
+/// Layout (inside the outer border):
+///   Setting rows — one row each (flexible, scrollable)
+///   hint line    — 1 row at the bottom
+fn draw_config_screen(
+    frame: &mut Frame,
+    config_screen: &ConfigScreen,
+    config: &RalphConfig,
+    area: Rect,
+) {
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Configuration ");
+    let inner_area = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    // Split inner area: settings rows (flexible) | hint line (1 row)
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner_area);
+
+    // Build setting rows. Currently there is one row.
+    let label = "Pass --dangerously-skip-permissions to claude";
+    let on = config.dangerously_skip_permissions;
+    let toggle_span = if on {
+        Span::styled("[ ON ]", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("[OFF]", Style::default().fg(Color::DarkGray))
+    };
+
+    let row_style = if config_screen.selected_row == 0 {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+
+    let row_line = Line::from(vec![
+        Span::styled(format!("  {label:<50}"), row_style),
+        toggle_span,
+    ]);
+
+    frame.render_widget(Paragraph::new(vec![row_line]), layout[0]);
+
+    // Hint line
+    let hint = Line::from("[Esc] Back  [↑↓] Navigate  [Space] Toggle");
+    frame.render_widget(Paragraph::new(hint), layout[1]);
 }
