@@ -1,6 +1,6 @@
 use crate::app::{
     App, ConfigScreen, Dialog, SpecEditorField, SpecEditorMode, SpecEditorState, SpecsFocus,
-    RunnerTab, RunnerTabState, TaskDetailField,
+    RunnerTab, RunnerTabState, TabKind, TaskDetailField,
 };
 use crate::ralph::RalphConfig;
 use crate::ralph::usage::UsageFile;
@@ -49,6 +49,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Dialog::NewWorkflow { input, error }) => {
             draw_new_workflow_dialog(frame, frame.area(), input, error);
         }
+        Some(Dialog::NewSpec { input, error }) => {
+            draw_new_spec_dialog(frame, frame.area(), input, error);
+        }
         Some(Dialog::DeleteWorkflow { name }) => {
             draw_delete_workflow_dialog(frame, frame.area(), name);
         }
@@ -77,6 +80,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Some(Dialog::StopConfirm) => {
             draw_stop_confirm_dialog(frame, frame.area());
+        }
+        Some(Dialog::SynthConfirm { spec_name }) => {
+            draw_synth_confirm_dialog(frame, frame.area(), spec_name);
         }
         None => {}
     }
@@ -152,7 +158,7 @@ fn draw_specs_tab(frame: &mut Frame, app: &App, area: Rect) {
 
     // Status bar
     let status_line = if app.specs_tab.focus == SpecsFocus::List {
-        "[j/↓] down  [k/↑] up  [Enter] preview  [Tab] switch tab  [q]uit"
+        "[n]ew  [R]esearch  [F]inalize  [S]ynth  [Enter] preview  [Tab] switch tab  [q]uit"
     } else {
         "[j/↓] scroll down  [k/↑] scroll up  [Esc] back to list  [Tab] switch tab  [q]uit"
     };
@@ -359,84 +365,99 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // Task bar (layout[0]): task title left-aligned, counts (tasks/iter/tokens) right-aligned.
-    // For Error state: show "Runner: {workflow_name}" dimmed. Insert mode uses same as Running/Done.
+    // Task bar (layout[0]):
+    // - SpecOp tabs: shows only tab.label in orange.
+    // - WorkflowRunner tabs: task title left-aligned, task/iter/token counts right-aligned.
+    //   For Error state: show "Runner: {label}" dimmed.
     let task_bar_width = layout[0].width;
-    let task_bar_line = match &tab.state {
-        RunnerTabState::Error(_) => Line::from(Span::styled(
-            format!("Runner: {}", tab.workflow_name),
-            Style::default().fg(Color::DarkGray),
-        )),
-        state => {
-            let iter_n = match state {
-                RunnerTabState::Running { iteration } => *iteration,
-                RunnerTabState::Done | RunnerTabState::Stopped => tab.iterations_used,
-                RunnerTabState::Error(_) => unreachable!(),
-            };
-            // Left side: task title truncated to 40 visible chars.
-            let task_title = match &tab.current_task_title {
-                Some(t) => {
-                    let chars: Vec<char> = t.chars().collect();
-                    if chars.len() > 40 {
-                        let truncated: String = chars.iter().take(39).collect();
-                        format!("{truncated}…")
-                    } else {
-                        t.clone()
-                    }
-                }
-                None => "unknown".to_string(),
-            };
-            // Right side: "{done}/{total} tasks  iter {n}  {token_str}"
-            let workflow_dir = app.store.workflow_dir(&tab.workflow_name);
-            let (done, total) = Workflow::load(&workflow_dir)
-                .map(|w| (w.done_count(), w.total_count()))
-                .unwrap_or((0, 0));
-            let token_str = match state {
-                RunnerTabState::Running { .. } => {
-                    let task_tokens =
-                        tab.current_task_input_tokens + tab.current_task_output_tokens;
-                    match UsageFile::load(&workflow_dir) {
-                        Ok(usage) => {
-                            let session_tokens =
-                                usage.total.input_tokens + usage.total.output_tokens + task_tokens;
-                            format!(
-                                "task: {}  session: {}",
-                                format_tokens(task_tokens),
-                                format_tokens(session_tokens)
-                            )
+    let task_bar_line = if tab.tab_kind == TabKind::SpecOp {
+        Line::from(Span::styled(
+            tab.label.clone(),
+            Style::default().fg(CLAUDE_ORANGE),
+        ))
+    } else {
+        match &tab.state {
+            RunnerTabState::Error(_) => Line::from(Span::styled(
+                format!("Runner: {}", tab.label),
+                Style::default().fg(Color::DarkGray),
+            )),
+            state => {
+                let iter_n = match state {
+                    RunnerTabState::Running { iteration } => *iteration,
+                    RunnerTabState::Done | RunnerTabState::Stopped => tab.iterations_used,
+                    RunnerTabState::Error(_) => unreachable!(),
+                };
+                // Left side: task title truncated to 40 visible chars.
+                let task_title = match &tab.current_task_title {
+                    Some(t) => {
+                        let chars: Vec<char> = t.chars().collect();
+                        if chars.len() > 40 {
+                            let truncated: String = chars.iter().take(39).collect();
+                            format!("{truncated}…")
+                        } else {
+                            t.clone()
                         }
-                        Err(_) => format!("task: {}", format_tokens(task_tokens)),
                     }
-                }
-                RunnerTabState::Done | RunnerTabState::Stopped => {
-                    match UsageFile::load(&workflow_dir) {
-                        Ok(usage) => {
-                            let session_tokens =
-                                usage.total.input_tokens + usage.total.output_tokens;
-                            format!("session: {}", format_tokens(session_tokens))
+                    None => "unknown".to_string(),
+                };
+                // Right side: "{done}/{total} tasks  iter {n}  {token_str}"
+                let workflow_dir = app.store.workflow_dir(&tab.label);
+                let (done, total) = Workflow::load(&workflow_dir)
+                    .map(|w| (w.done_count(), w.total_count()))
+                    .unwrap_or((0, 0));
+                let token_str = match state {
+                    RunnerTabState::Running { .. } => {
+                        let task_tokens =
+                            tab.current_task_input_tokens + tab.current_task_output_tokens;
+                        match UsageFile::load(&workflow_dir) {
+                            Ok(usage) => {
+                                let session_tokens = usage.total.input_tokens
+                                    + usage.total.output_tokens
+                                    + task_tokens;
+                                format!(
+                                    "task: {}  session: {}",
+                                    format_tokens(task_tokens),
+                                    format_tokens(session_tokens)
+                                )
+                            }
+                            Err(_) => format!("task: {}", format_tokens(task_tokens)),
                         }
-                        Err(_) => "session: ? tok".to_string(),
                     }
-                }
-                RunnerTabState::Error(_) => unreachable!(),
-            };
-            let right_str = format!("{done}/{total} tasks  iter {iter_n}  {token_str}");
-            let left_len = task_title.chars().count();
-            let mut spans = vec![Span::raw(task_title)];
-            spans.extend(notification_right_spans(
-                left_len,
-                &right_str,
-                task_bar_width,
-            ));
-            Line::from(spans)
+                    RunnerTabState::Done | RunnerTabState::Stopped => {
+                        match UsageFile::load(&workflow_dir) {
+                            Ok(usage) => {
+                                let session_tokens =
+                                    usage.total.input_tokens + usage.total.output_tokens;
+                                format!("session: {}", format_tokens(session_tokens))
+                            }
+                            Err(_) => "session: ? tok".to_string(),
+                        }
+                    }
+                    RunnerTabState::Error(_) => unreachable!(),
+                };
+                let right_str = format!("{done}/{total} tasks  iter {iter_n}  {token_str}");
+                let left_len = task_title.chars().count();
+                let mut spans = vec![Span::raw(task_title)];
+                spans.extend(notification_right_spans(
+                    left_len,
+                    &right_str,
+                    task_bar_width,
+                ));
+                Line::from(spans)
+            }
         }
     };
     frame.render_widget(Paragraph::new(task_bar_line), layout[0]);
 
-    // PTY viewport (layout[1]): border title is now "Runner: {workflow_name}" only.
+    // PTY viewport (layout[1]): border title shows "Runner: {label}" for WorkflowRunner tabs
+    // and just the label for SpecOp tabs.
     // The vt100 scrollback position (set_scrollback) is updated by key handlers so that
     // PseudoTerminal renders the correct view without needing a mutable App reference.
-    let log_title_text = format!("Runner: {}", tab.workflow_name);
+    let log_title_text = if tab.tab_kind == TabKind::SpecOp {
+        tab.label.clone()
+    } else {
+        format!("Runner: {}", tab.label)
+    };
     let log_block = Block::default().borders(Borders::ALL).title(Span::styled(
         log_title_text,
         Style::default().fg(CLAUDE_ORANGE),
@@ -474,9 +495,12 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                 )))
             }
             RunnerTabState::Done => {
-                // [c]continue only when auto OFF and workflow not complete.
-                let workflow_complete = app.is_workflow_complete(&tab.workflow_name);
-                let show_continue = !tab.auto_continue && !workflow_complete;
+                // [c]continue only for WorkflowRunner tabs when auto OFF and workflow not complete.
+                let workflow_complete = tab.tab_kind == TabKind::WorkflowRunner
+                    && app.is_workflow_complete(&tab.label);
+                let show_continue = tab.tab_kind == TabKind::WorkflowRunner
+                    && !tab.auto_continue
+                    && !workflow_complete;
                 if show_continue {
                     Line::from(vec![
                         Span::raw("[c]continue  "),
@@ -535,7 +559,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         };
         let is_done = matches!(tab.state, RunnerTabState::Done);
         entries.push((
-            format!(" [{}] {}{} ", i + 3, tab.workflow_name, suffix),
+            format!(" [{}] {}{} ", i + 3, tab.label, suffix),
             app.active_tab == i + 2,
             true,
             is_done,
@@ -627,7 +651,7 @@ fn runner_tab_context(app: &App, tab: &RunnerTab) -> Option<String> {
         None => "unknown".to_string(),
     };
 
-    let workflow_dir = app.store.workflow_dir(&tab.workflow_name);
+    let workflow_dir = app.store.workflow_dir(&tab.label);
     let (done, total) = Workflow::load(&workflow_dir)
         .map(|w| (w.done_count(), w.total_count()))
         .unwrap_or((0, 0));
@@ -723,6 +747,16 @@ fn draw_delete_workflow_dialog(frame: &mut Frame, area: Rect, name: &str) {
     frame.render_widget(Paragraph::new(text).block(block), dialog_rect);
 }
 
+fn draw_synth_confirm_dialog(frame: &mut Frame, area: Rect, spec_name: &str) {
+    // 72 chars wide (2 border + 70 content), 3 rows tall (2 border + 1 content line)
+    let dialog_rect = centered_rect(72, 3, area);
+    frame.render_widget(Clear, dialog_rect);
+
+    let text = format!("Synthesize spec '{spec_name}' into workflows.json? [y/N]");
+    let block = Block::default().borders(Borders::ALL).title("Synth Confirm");
+    frame.render_widget(Paragraph::new(text).block(block), dialog_rect);
+}
+
 fn draw_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
     // 38 chars wide (2 border + 36 content), 3 rows tall (2 border + 1 content line)
     let dialog_rect = centered_rect(38, 3, area);
@@ -778,6 +812,24 @@ fn draw_new_workflow_dialog(frame: &mut Frame, area: Rect, input: &str, error: &
     frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
 }
 
+fn draw_new_spec_dialog(frame: &mut Frame, area: Rect, input: &str, error: &Option<String>) {
+    // 72 chars wide (2 border + 70 content), 4 rows tall (2 border + 2 content)
+    let dialog_rect = centered_rect(72, 4, area);
+    frame.render_widget(Clear, dialog_rect);
+
+    let prompt = format!("Feature name: {input}_");
+    let lines: Vec<Line> = match error {
+        Some(err) => vec![
+            Line::from(prompt),
+            Line::from(Span::styled(err.as_str(), Style::default().fg(Color::Red))),
+        ],
+        None => vec![Line::from(prompt), Line::from("")],
+    };
+
+    let block = Block::default().borders(Borders::ALL).title("New Spec");
+    frame.render_widget(Paragraph::new(lines).block(block), dialog_rect);
+}
+
 fn draw_import_spec_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -813,21 +865,30 @@ fn draw_import_spec_dialog(
 }
 
 fn draw_help_dialog(frame: &mut Frame, area: Rect) {
-    // 52 wide (2 border + 50 content), 13 tall (2 border + 11 keybinding rows)
-    let dialog_rect = centered_rect(52, 13, area);
+    // 52 wide (2 border + 50 content), 21 tall (2 border + 19 keybinding rows)
+    let dialog_rect = centered_rect(52, 21, area);
     frame.render_widget(Clear, dialog_rect);
 
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
     let lines = vec![
+        Line::from(Span::styled("  -- Workflows tab --", header_style)),
         Line::from("  j/k/\u{2191}\u{2193}   navigate workflows"),
         Line::from("  r         run ralph loop"),
         Line::from("  s         stop loop / synthesis"),
-        Line::from("  S         synthesize workflows.json from spec-source.md"),
+        Line::from("  S         synthesize workflows.json from spec"),
         Line::from("  n         new workflow"),
         Line::from("  i         import spec file"),
         Line::from("  e         edit workflows.json"),
         Line::from("  E         open form editor"),
         Line::from("  d         delete workflow"),
         Line::from("  ?         help"),
+        Line::from("  q         quit"),
+        Line::from(""),
+        Line::from(Span::styled("  -- Specs tab --", header_style)),
+        Line::from("  n         new spec"),
+        Line::from("  R         research selected spec"),
+        Line::from("  F         finalize selected spec"),
+        Line::from("  S         synth selected spec"),
         Line::from("  q         quit"),
     ];
     let block = Block::default().borders(Borders::ALL).title("Help");

@@ -95,7 +95,7 @@ Prefer these MCP tools when available:
 
 ## Rules
 
-- Never mention the word `RALPH_SENTINEL_COMPLETE` unless the signal completion step is reached.
+- Never mention the word `RALPH_SENTINEL_COMPLETE` unless the signal completion step is reached, otherwise the Ralph loop will break prematurely.
 - Never commit `workflows.json`, `progress.txt`, or any files under `$RALPH_PLAN_DIR`
 - One task per invocation — stop after completing it
 - Keep changes minimal and focused

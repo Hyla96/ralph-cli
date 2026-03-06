@@ -34,9 +34,20 @@ pub enum RunnerTabState {
     Error(String),
 }
 
+/// Whether this tab is a workflow runner or a spec operation (researcher / finalizer / synth).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TabKind {
+    WorkflowRunner,
+    SpecOp,
+}
+
 /// Holds all state for a single runner tab.
 pub struct RunnerTab {
-    pub workflow_name: String,
+    /// Display label for the tab. For WorkflowRunner tabs this is the workflow name;
+    /// for SpecOp tabs it is a human-readable description like "research: my-feature".
+    pub label: String,
+    /// Whether this is a workflow runner or a spec operation tab.
+    pub tab_kind: TabKind,
     /// VT100 terminal emulator that processes raw PTY bytes.
     /// Scrollback is set to 1000 rows. Dimensions kept in sync with the terminal.
     pub parser: VtParser,
@@ -80,6 +91,11 @@ pub enum Dialog {
         input: String,
         error: Option<String>,
     },
+    /// Dialog for creating a new spec (Specs tab [n] keybinding).
+    NewSpec {
+        input: String,
+        error: Option<String>,
+    },
     DeleteWorkflow {
         name: String,
     },
@@ -100,6 +116,10 @@ pub enum Dialog {
     QuitConfirm,
     /// Shown when the user presses [s] and the workflow is not complete; y/Y stops, any other key cancels.
     StopConfirm,
+    /// Confirmation dialog before launching spec-synth for the selected spec ([S] in Specs tab).
+    SynthConfirm {
+        spec_name: String,
+    },
 }
 
 /// Which field of the metadata form currently has focus.
@@ -533,6 +553,164 @@ async fn synth_task(
     let _ = tx.send(RunnerEvent::Exited(exit_code));
 }
 
+/// Spawns `claude --dangerously-skip-permissions <skill>` inside a PTY.
+/// Modelled on `runner_task` but without the token-line scanner.
+/// Environment variables in `env` are set on the child process via `cmd.env()`.
+#[allow(clippy::too_many_arguments)]
+async fn spec_op_task(
+    skill: String,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    tx: UnboundedSender<RunnerEvent>,
+    kill_rx: oneshot::Receiver<()>,
+    mut stdin_rx: UnboundedReceiver<Vec<u8>>,
+    size: (u16, u16),
+    resize_rx: UnboundedReceiver<(u16, u16)>,
+) {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let _ = tx.send(RunnerEvent::Bytes(
+        format!(
+            "[spec-op] spawning claude {} in {}\r\n",
+            skill,
+            cwd.display()
+        )
+        .into_bytes(),
+    ));
+
+    let (cols, rows) = size;
+    let pty_system = native_pty_system();
+    let pair = match pty_system.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY open failed: {e}")));
+            return;
+        }
+    };
+
+    let mut cmd = CommandBuilder::new("claude");
+    cmd.args(["--dangerously-skip-permissions", &skill]);
+    cmd.cwd(&cwd);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+
+    let mut child = match pair.slave.spawn_command(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = e.to_string();
+            let friendly = if msg.contains("No such file") || msg.contains("not found") {
+                "claude not found on PATH".to_string()
+            } else {
+                msg
+            };
+            let _ = tx.send(RunnerEvent::SpawnError(friendly));
+            return;
+        }
+    };
+
+    let _ = tx.send(RunnerEvent::Bytes(
+        format!("[spec-op] spawned claude pid={:?}\r\n", child.process_id()).into_bytes(),
+    ));
+
+    let mut killer = child.clone_killer();
+    drop(pair.slave);
+
+    let master = pair.master;
+
+    let reader = match master.try_clone_reader() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY reader: {e}")));
+            return;
+        }
+    };
+    let mut writer = match master.take_writer() {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = tx.send(RunnerEvent::SpawnError(format!("PTY writer: {e}")));
+            return;
+        }
+    };
+
+    // Read PTY output; detect RALPH_SENTINEL_COMPLETE; no token-line scanner.
+    let tx_read = tx.clone();
+    let read_handle = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let mut reader = reader;
+        let mut tail: Vec<u8> = Vec::new();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let chunk = &buf[..n];
+                    let mut combined = Vec::with_capacity(tail.len() + n);
+                    combined.extend_from_slice(&tail);
+                    combined.extend_from_slice(chunk);
+                    let combined_lossy = String::from_utf8_lossy(&combined);
+                    let stripped_combined = strip_ansi(&combined_lossy);
+                    if stripped_combined.contains("RALPH_SENTINEL_COMPLETE") {
+                        let _ = tx_read.send(RunnerEvent::Complete);
+                    }
+                    tail = chunk[chunk.len().saturating_sub(512)..].to_vec();
+                    if tx_read.send(RunnerEvent::Bytes(chunk.to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    drop(tokio::spawn(async move {
+        use std::io::Write;
+        while let Some(bytes) = stdin_rx.recv().await {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+        }
+    }));
+
+    drop(tokio::spawn(async move {
+        use portable_pty::PtySize;
+        let mut resize_rx = resize_rx;
+        while let Some((cols, rows)) = resize_rx.recv().await {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+    }));
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<u32>();
+    tokio::task::spawn_blocking(move || {
+        let code = child
+            .wait()
+            .map(|s| if s.success() { 0u32 } else { 1u32 })
+            .unwrap_or(1u32);
+        let _ = done_tx.send(code);
+    });
+
+    let (was_killed, exit_code) = tokio::select! {
+        result = done_rx => (false, Some(result.unwrap_or(1))),
+        _ = kill_rx => (true, None),
+    };
+
+    if was_killed {
+        let _ = killer.kill();
+    }
+
+    let _ = tokio::time::timeout(Duration::from_millis(500), read_handle).await;
+    let _ = tx.send(RunnerEvent::Exited(exit_code));
+}
+
 /// Maps a crossterm `KeyEvent` to the raw bytes that should be sent to the PTY.
 ///
 /// Returns `None` for keys that have no meaningful PTY representation (function
@@ -927,6 +1105,37 @@ impl App {
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
                             self.config_screen = Some(ConfigScreen { selected_row: 0 });
                         }
+                        // [?] help — open the help dialog from the Specs tab.
+                        KeyCode::Char('?') => self.open_help_dialog(),
+                        // [n]ew spec — available from both list and content focus.
+                        KeyCode::Char('n') => self.open_new_spec_dialog(),
+                        // [R]esearch — launch researcher for the selected spec (both focuses).
+                        KeyCode::Char('R') => {
+                            if let Some(idx) = self.specs_tab.selected {
+                                let spec_name = self.specs_tab.files[idx].clone();
+                                let spec_path =
+                                    self.store.spec_dir(&spec_name).join("spec-source.md");
+                                let label = format!("research: {spec_name}");
+                                self.start_spec_op(label, "spec-researcher", None, Some(spec_path));
+                            }
+                        }
+                        // [S]ynth — confirm then launch spec-synth for the selected spec (both focuses).
+                        KeyCode::Char('S') => {
+                            if let Some(idx) = self.specs_tab.selected {
+                                let spec_name = self.specs_tab.files[idx].clone();
+                                self.dialog = Some(Dialog::SynthConfirm { spec_name });
+                            }
+                        }
+                        // [F]inalize — launch spec-finalize for the selected spec (both focuses).
+                        KeyCode::Char('F') => {
+                            if let Some(idx) = self.specs_tab.selected {
+                                let spec_name = self.specs_tab.files[idx].clone();
+                                let spec_path =
+                                    self.store.spec_dir(&spec_name).join("spec-source.md");
+                                let label = format!("finalize: {spec_name}");
+                                self.start_spec_op(label, "/spec-finalize", None, Some(spec_path));
+                            }
+                        }
                         _ => match self.specs_tab.focus {
                             SpecsFocus::List => match key.code {
                                 KeyCode::Down | KeyCode::Char('j') => {
@@ -1086,18 +1295,21 @@ impl App {
                                 self.running = false;
                             }
                             KeyCode::Char('s') => {
-                                let (is_running, workflow_name) = self
+                                let (is_running, is_workflow_runner, label) = self
                                     .runner_tabs
                                     .get(tab_idx)
                                     .map(|t| {
                                         (
                                             matches!(t.state, RunnerTabState::Running { .. }),
-                                            t.workflow_name.clone(),
+                                            t.tab_kind == TabKind::WorkflowRunner,
+                                            t.label.clone(),
                                         )
                                     })
-                                    .unwrap_or((false, String::new()));
+                                    .unwrap_or((false, false, String::new()));
                                 if is_running {
-                                    if self.is_workflow_complete(&workflow_name) {
+                                    // For WorkflowRunner tabs: skip confirm if already complete.
+                                    // For SpecOp tabs: always show confirm (no workflow to check).
+                                    if is_workflow_runner && self.is_workflow_complete(&label) {
                                         self.stop_runner();
                                     } else {
                                         self.dialog = Some(Dialog::StopConfirm);
@@ -1355,6 +1567,59 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.handle_import_spec_submit(&workflow_name, &input);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // SynthConfirm dialog (Specs tab [S] keybinding): y/Y launches spec-synth, any other key cancels.
+        if let Some(Dialog::SynthConfirm { spec_name }) = &self.dialog {
+            let spec_name = spec_name.clone();
+            self.dialog = None;
+            if code == KeyCode::Char('y') || code == KeyCode::Char('Y') {
+                let spec_path = self.store.spec_dir(&spec_name).join("spec-source.md");
+                let label = format!("synth: {spec_name}");
+                self.start_spec_op(label, "/spec-synth", None, Some(spec_path));
+            }
+            return;
+        }
+
+        // NewSpec dialog (Specs tab [n] keybinding).
+        if matches!(self.dialog, Some(Dialog::NewSpec { .. })) {
+            match code {
+                KeyCode::Esc => {
+                    self.dialog = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(Dialog::NewSpec { input, error }) = &mut self.dialog {
+                        input.pop();
+                        *error = None;
+                    }
+                }
+                KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' => {
+                    if let Some(Dialog::NewSpec { input, error }) = &mut self.dialog {
+                        input.push(c);
+                        *error = None;
+                    }
+                }
+                KeyCode::Enter => {
+                    let input = match &self.dialog {
+                        Some(Dialog::NewSpec { input, .. }) => input.clone(),
+                        _ => return,
+                    };
+                    if !Store::is_valid_name(&input) {
+                        if let Some(Dialog::NewSpec { error, .. }) = &mut self.dialog {
+                            *error = Some(
+                                "Invalid name — use lowercase letters, digits, hyphens (3–64 chars)"
+                                    .to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    self.dialog = None;
+                    let label = format!("spec: {input}");
+                    self.start_spec_op(label, "/spec", Some(input), None);
                 }
                 _ => {}
             }
@@ -2046,6 +2311,14 @@ impl App {
         });
     }
 
+    /// Opens the NewSpec dialog so the user can type a feature name to create a new spec.
+    fn open_new_spec_dialog(&mut self) {
+        self.dialog = Some(Dialog::NewSpec {
+            input: String::new(),
+            error: None,
+        });
+    }
+
     /// Opens the ImportSpec dialog for the currently selected workflow.
     fn open_import_spec_dialog(&mut self) {
         let Some(idx) = self.selected_workflow else {
@@ -2180,49 +2453,53 @@ impl App {
         });
     }
 
-    /// Scans `<repo_root>/tasks/` for `.md` files and populates `specs_tab`.
+    /// Scans `<repo_root>/.ralph/specs/` for subdirectories that contain a
+    /// `spec-source.md` file and populates `specs_tab` with their names.
     ///
-    /// - Files are sorted alphabetically by filename.
-    /// - If the directory does not exist or contains no `.md` files, `files` is
-    ///   empty and `selected` is `None`.
-    /// - If files are present, `selected` defaults to `Some(0)` and `content` is
-    ///   set to the full text of the first file; `scroll` is reset to 0.
+    /// - Names are sorted alphabetically.
+    /// - If the directory does not exist or contains no matching subdirs, `files`
+    ///   is empty and `selected` is `None`.
+    /// - If names are present, `selected` defaults to `Some(0)` and `content` is
+    ///   set to the full text of the first spec-source.md; `scroll` is reset to 0.
     pub fn load_specs_files(&mut self) {
-        let tasks_dir = self.store.root().join("tasks");
-        let mut files: Vec<String> = match std::fs::read_dir(&tasks_dir) {
+        let specs_dir = self.store.root().join(".ralph").join("specs");
+        let mut names: Vec<String> = match std::fs::read_dir(&specs_dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path().extension().and_then(|s| s.to_str()) == Some("md")
+                    e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                        && e.path().join("spec-source.md").exists()
                 })
                 .filter_map(|e| e.file_name().to_str().map(|s| s.to_owned()))
                 .collect(),
             Err(_) => Vec::new(),
         };
-        files.sort();
+        names.sort();
 
-        if files.is_empty() {
-            self.specs_tab.files = files;
+        if names.is_empty() {
+            self.specs_tab.files = names;
             self.specs_tab.selected = None;
             self.specs_tab.content = String::new();
         } else {
-            let first_path = tasks_dir.join(&files[0]);
+            let first_path = self.store.spec_dir(&names[0]).join("spec-source.md");
             let content = std::fs::read_to_string(&first_path).unwrap_or_default();
             self.specs_tab.selected = Some(0);
             self.specs_tab.content = content;
             self.specs_tab.scroll = 0;
-            self.specs_tab.files = files;
+            self.specs_tab.files = names;
         }
     }
 
-    /// Selects the file at `idx` in `specs_tab.files`, loads its content from disk,
-    /// and resets the scroll offset to 0.
+    /// Selects the spec at `idx` in `specs_tab.files`, loads its `spec-source.md`
+    /// content from disk, and resets the scroll offset to 0.
     ///
     /// # Panics
     /// Panics if `idx` is out of bounds for `specs_tab.files`.
     fn select_specs_file(&mut self, idx: usize) {
-        let tasks_dir = self.store.root().join("tasks");
-        let path = tasks_dir.join(&self.specs_tab.files[idx]);
+        let path = self
+            .store
+            .spec_dir(&self.specs_tab.files[idx])
+            .join("spec-source.md");
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         self.specs_tab.selected = Some(idx);
         self.specs_tab.content = content;
@@ -2328,11 +2605,12 @@ impl App {
         if let Some(Dialog::ContinuePrompt { next_id, .. }) = &self.dialog {
             let next_id_clone = next_id.clone();
 
-            // Find the workflow name for the active runner tab.
+            // Find the workflow name for the active runner tab (WorkflowRunner only).
             let tab_workflow_name = (self.active_tab > 1)
                 .then(|| self.runner_tabs.get(self.active_tab - 2))
                 .flatten()
-                .map(|t| t.workflow_name.clone());
+                .filter(|t| t.tab_kind == TabKind::WorkflowRunner)
+                .map(|t| t.label.clone());
 
             let task_still_pending = tab_workflow_name
                 .as_ref()
@@ -2448,37 +2726,50 @@ impl App {
 
         // Complete signal handling.
         //
-        // Three sub-cases based on (auto_continue, done):
+        // For SpecOp tabs: complete always transitions to Done (no spawn-next logic).
+        // For WorkflowRunner tabs, three sub-cases based on (auto_continue, done):
         //   auto_continue=false (any done): mark Done immediately — original behavior.
         //   auto_continue=true, done=false: sentinel arrived, process still running;
         //     decide now — spawn next or mark Done.
         //   auto_continue=true, done=true: defer all state changes to the done block below
         //     so the done block can read the Running iteration and run the auto-loop.
         if complete {
-            let is_auto = self.runner_tabs[tab_idx].auto_continue;
-            if is_auto && !done {
-                // Sentinel received; process still running. Decide now.
-                self.load_current_workflow();
-                let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
-                let is_complete = self.is_workflow_complete(&workflow_name);
-                if is_complete {
+            let is_spec_op = self.runner_tabs[tab_idx].tab_kind == TabKind::SpecOp;
+            if is_spec_op {
+                // SpecOp: complete → Done immediately (only when process has not yet exited).
+                if !done {
                     self.runner_tabs[tab_idx].state = RunnerTabState::Done;
                     self.runner_tabs[tab_idx].insert_mode = false;
-                } else {
-                    // Kill the old process before spawning next. It sent the sentinel
-                    // but has not exited yet. Mirrors the stop_runner() pattern.
-                    if let Some(kill_tx) = self.runner_tabs[tab_idx].runner_kill_tx.take() {
-                        let _ = kill_tx.send(());
-                    }
-                    self.spawn_next_iteration_at(tab_idx);
+                    // Refresh spec list in case the researcher wrote new files.
+                    self.load_specs_files();
                 }
-            } else if !is_auto {
-                // Original behavior: mark Done right away.
-                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                self.runner_tabs[tab_idx].insert_mode = false;
-                self.load_current_workflow();
+                // When done=true: let done block handle it.
+            } else {
+                let is_auto = self.runner_tabs[tab_idx].auto_continue;
+                if is_auto && !done {
+                    // Sentinel received; process still running. Decide now.
+                    self.load_current_workflow();
+                    let label = self.runner_tabs[tab_idx].label.clone();
+                    let is_complete = self.is_workflow_complete(&label);
+                    if is_complete {
+                        self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        self.runner_tabs[tab_idx].insert_mode = false;
+                    } else {
+                        // Kill the old process before spawning next. It sent the sentinel
+                        // but has not exited yet. Mirrors the stop_runner() pattern.
+                        if let Some(kill_tx) = self.runner_tabs[tab_idx].runner_kill_tx.take() {
+                            let _ = kill_tx.send(());
+                        }
+                        self.spawn_next_iteration_at(tab_idx);
+                    }
+                } else if !is_auto {
+                    // Original behavior: mark Done right away.
+                    self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                    self.runner_tabs[tab_idx].insert_mode = false;
+                    self.load_current_workflow();
+                }
+                // When is_auto && done: fall through; the done block below handles everything.
             }
-            // When is_auto && done: fall through; the done block below handles everything.
         }
 
         if done {
@@ -2510,12 +2801,15 @@ impl App {
                 // Reload plan from disk — ralph may have updated passes: true.
                 self.load_current_workflow();
 
-                // Persist token usage to usage.json.
-                {
+                let is_workflow_runner =
+                    self.runner_tabs[tab_idx].tab_kind == TabKind::WorkflowRunner;
+
+                // Persist token usage to usage.json (WorkflowRunner only).
+                if is_workflow_runner {
                     let tab = &self.runner_tabs[tab_idx];
-                    let workflow_name = tab.workflow_name.clone();
+                    let label = tab.label.clone();
                     let task_id = tab.current_task_id.clone();
-                    let workflow_dir = self.store.workflow_dir(&workflow_name);
+                    let workflow_dir = self.store.workflow_dir(&label);
                     let task_usage = TaskUsage {
                         input_tokens: tab.current_task_input_tokens,
                         output_tokens: tab.current_task_output_tokens,
@@ -2548,65 +2842,73 @@ impl App {
                 };
 
                 if let Some(iteration) = iteration_opt {
-                    // Load the specific workflow for this runner tab (may differ from selected).
-                    let workflow_name = self.runner_tabs[tab_idx].workflow_name.clone();
-                    let is_complete = self.is_workflow_complete(&workflow_name);
-                    let workflow_dir = self.store.workflow_dir(&workflow_name);
-                    let tab_workflow = Workflow::load(&workflow_dir).ok();
+                    if is_workflow_runner {
+                        // WorkflowRunner: load workflow and apply auto-continue/ContinuePrompt logic.
+                        let label = self.runner_tabs[tab_idx].label.clone();
+                        let is_complete = self.is_workflow_complete(&label);
+                        let workflow_dir = self.store.workflow_dir(&label);
+                        let tab_workflow = Workflow::load(&workflow_dir).ok();
 
-                    let auto_continue = self.runner_tabs[tab_idx].auto_continue;
+                        let auto_continue = self.runner_tabs[tab_idx].auto_continue;
 
-                    if auto_continue {
-                        // Sentinel (saw_complete) takes precedence: treat as success regardless of
-                        // exit code. Without sentinel, exit code 0 is success.
-                        let is_success =
-                            saw_complete || matches!(exited_code, Some(Some(0)));
+                        if auto_continue {
+                            // Sentinel (saw_complete) takes precedence: treat as success regardless of
+                            // exit code. Without sentinel, exit code 0 is success.
+                            let is_success =
+                                saw_complete || matches!(exited_code, Some(Some(0)));
 
-                        if is_complete {
-                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                            self.runner_tabs[tab_idx].insert_mode = false;
-                        } else if is_success {
-                            // Success: spawn next iteration immediately.
-                            self.spawn_next_iteration_at(tab_idx);
-                        } else if iteration >= MAX_ITERATIONS {
-                            let msg = format!(
-                                "\r\n[runner] Max iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
-                            );
-                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
-                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                            self.runner_tabs[tab_idx].insert_mode = false;
+                            if is_complete {
+                                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                                self.runner_tabs[tab_idx].insert_mode = false;
+                            } else if is_success {
+                                // Success: spawn next iteration immediately.
+                                self.spawn_next_iteration_at(tab_idx);
+                            } else if iteration >= MAX_ITERATIONS {
+                                let msg = format!(
+                                    "\r\n[runner] Max iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
+                                );
+                                self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
+                                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                                self.runner_tabs[tab_idx].insert_mode = false;
+                            } else {
+                                // Failure (no sentinel, non-zero exit): prompt the user instead
+                                // of auto-retrying so they can inspect output before deciding.
+                                let next = tab_workflow
+                                    .as_ref()
+                                    .and_then(|w| w.next_task())
+                                    .map(|t| (t.id.clone(), t.title.clone()))
+                                    .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
+                                self.dialog = Some(Dialog::ContinuePrompt {
+                                    next_id: next.0,
+                                    next_title: next.1,
+                                });
+                                // Keep Running { iteration } while awaiting the user's decision.
+                            }
                         } else {
-                            // Failure (no sentinel, non-zero exit): prompt the user instead
-                            // of auto-retrying so they can inspect output before deciding.
-                            let next = tab_workflow
-                                .as_ref()
-                                .and_then(|w| w.next_task())
-                                .map(|t| (t.id.clone(), t.title.clone()))
-                                .unwrap_or_else(|| ("?".to_string(), "unknown".to_string()));
-                            self.dialog = Some(Dialog::ContinuePrompt {
-                                next_id: next.0,
-                                next_title: next.1,
-                            });
-                            // Keep Running { iteration } while awaiting the user's decision.
+                            // auto_continue=false: transition to Done; user presses [c] to continue.
+                            if is_complete {
+                                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                                self.runner_tabs[tab_idx].insert_mode = false;
+                            } else if iteration >= MAX_ITERATIONS {
+                                let msg = format!(
+                                    "\r\nMax iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
+                                );
+                                self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
+                                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                                self.runner_tabs[tab_idx].insert_mode = false;
+                            } else {
+                                // Natural exit within limit — transition to Done.
+                                // User can press [c] to continue to the next task.
+                                self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                                self.runner_tabs[tab_idx].insert_mode = false;
+                            }
                         }
                     } else {
-                        // auto_continue=false: transition to Done; user presses [c] to continue.
-                        if is_complete {
-                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                            self.runner_tabs[tab_idx].insert_mode = false;
-                        } else if iteration >= MAX_ITERATIONS {
-                            let msg = format!(
-                                "\r\nMax iterations ({MAX_ITERATIONS}) reached. Stopping.\r\n"
-                            );
-                            self.runner_tabs[tab_idx].parser.process(msg.as_bytes());
-                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                            self.runner_tabs[tab_idx].insert_mode = false;
-                        } else {
-                            // Natural exit within limit — transition to Done.
-                            // User can press [c] to continue to the next task.
-                            self.runner_tabs[tab_idx].state = RunnerTabState::Done;
-                            self.runner_tabs[tab_idx].insert_mode = false;
-                        }
+                        // SpecOp: always transition to Done on exit.
+                        self.runner_tabs[tab_idx].state = RunnerTabState::Done;
+                        self.runner_tabs[tab_idx].insert_mode = false;
+                        // Refresh spec list in case the researcher wrote new files.
+                        self.load_specs_files();
                     }
                 }
             }
@@ -2826,7 +3128,7 @@ impl App {
         if self
             .runner_tabs
             .iter()
-            .any(|t| t.workflow_name == name && matches!(t.state, RunnerTabState::Running { .. }))
+            .any(|t| t.tab_kind == TabKind::WorkflowRunner && t.label == name && matches!(t.state, RunnerTabState::Running { .. }))
         {
             self.status_message = Some("Already running".to_string());
             self.status_message_expires = Some(Instant::now() + Duration::from_secs(2));
@@ -2855,7 +3157,9 @@ impl App {
 
         // Reuse an existing Done/Error tab for this workflow rather than accumulating tabs.
         let reuse_idx = self.runner_tabs.iter().position(|t| {
-            t.workflow_name == name && !matches!(t.state, RunnerTabState::Running { .. })
+            t.tab_kind == TabKind::WorkflowRunner
+                && t.label == name
+                && !matches!(t.state, RunnerTabState::Running { .. })
         });
 
         let (cols, rows) = self.initial_size;
@@ -2883,7 +3187,8 @@ impl App {
             self.active_tab = reuse + 2; // active_tab is 2-indexed for runner tabs (0=Specs, 1=Workflows)
         } else {
             let tab = RunnerTab {
-                workflow_name: name,
+                label: name.clone(),
+                tab_kind: TabKind::WorkflowRunner,
                 parser: VtParser::new(pty_rows, cols, 1000),
                 state: RunnerTabState::Running { iteration: 1 },
                 runner_rx: Some(rx),
@@ -2928,11 +3233,85 @@ impl App {
         self.spawn_next_iteration_at(self.active_tab - 2);
     }
 
+    /// Opens a new SpecOp PTY tab that runs `claude --dangerously-skip-permissions <skill>`.
+    ///
+    /// - `label`: display name shown in the tab bar (e.g. `"research: my-feature"`).
+    /// - `skill`: the slash-command or skill name passed to `--dangerously-skip-permissions`
+    ///   (e.g. `"/spec"`, `"spec-researcher"`, `"/spec-finalize"`, `"/spec-synth"`).
+    /// - `spec_name`: when `Some`, the `SPEC_NAME` environment variable is set; used by the
+    ///   `/spec` skill to skip the interactive "what is the feature name?" prompt.
+    /// - `spec_path`: when `Some`, the `SPEC_FILE` environment variable is set to the given path
+    ///   so the skill knows which spec to operate on.
+    ///
+    /// The new tab is appended, `active_tab` is switched to it, and `insert_mode` is set `true`.
+    pub fn start_spec_op(
+        &mut self,
+        label: String,
+        skill: &str,
+        spec_name: Option<String>,
+        spec_path: Option<PathBuf>,
+    ) {
+        let cwd = self.store.root().to_path_buf();
+
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(name) = spec_name {
+            env.push(("SPEC_NAME".to_string(), name));
+        }
+        if let Some(path) = spec_path {
+            env.push(("SPEC_FILE".to_string(), path.to_string_lossy().into_owned()));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
+        let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
+
+        let (cols, rows) = self.initial_size;
+        let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
+
+        let tab = RunnerTab {
+            label: label.clone(),
+            tab_kind: TabKind::SpecOp,
+            parser: VtParser::new(pty_rows, cols, 1000),
+            state: RunnerTabState::Running { iteration: 1 },
+            runner_rx: Some(rx),
+            runner_kill_tx: Some(kill_tx),
+            stdin_tx: Some(stdin_tx),
+            log_scroll: 0,
+            auto_continue: false,
+            current_task_id: None,
+            current_task_title: None,
+            iterations_used: 1,
+            current_task_input_tokens: 0,
+            current_task_output_tokens: 0,
+            current_task_cache_read_tokens: 0,
+            current_task_cache_write_tokens: 0,
+            current_task_cost_usd: 0.0,
+            insert_mode: true,
+            saw_complete: false,
+        };
+
+        self.runner_tabs.push(tab);
+        self.active_tab = 1 + self.runner_tabs.len();
+        self.resize_txs.push(resize_tx);
+
+        drop(tokio::spawn(spec_op_task(
+            skill.to_string(),
+            cwd,
+            env,
+            tx,
+            kill_rx,
+            stdin_rx,
+            (cols, pty_rows),
+            resize_rx,
+        )));
+    }
+
     /// Restarts the runner for a tab currently in `Stopped` state.
     /// Resets the tab to a fresh `Running { iteration: 1 }` with a new subprocess,
     /// preserving the same workflow. Returns early if the tab is not in `Stopped` state.
     fn restart_runner_at(&mut self, tab_idx: usize) {
-        // Extract workflow_name; confirm the tab is Stopped.
+        // Extract label; confirm the tab is Stopped.
         let name = {
             let Some(tab) = self.runner_tabs.get(tab_idx) else {
                 return;
@@ -2940,7 +3319,7 @@ impl App {
             if !matches!(tab.state, RunnerTabState::Stopped) {
                 return;
             }
-            tab.workflow_name.clone()
+            tab.label.clone()
         };
 
         let plan_dir = self.store.workflow_dir(&name);
@@ -3004,7 +3383,7 @@ impl App {
     /// Requires the tab to be in `Running { iteration }` or `Done` state; returns early otherwise.
     /// When called from `Done` state, uses `iterations_used` as the iteration count.
     fn spawn_next_iteration_at(&mut self, tab_idx: usize) {
-        // Extract workflow_name and iteration without holding a borrow.
+        // Extract label and iteration without holding a borrow.
         let (name, iteration) = {
             let Some(tab) = self.runner_tabs.get(tab_idx) else {
                 return;
@@ -3014,7 +3393,7 @@ impl App {
                 RunnerTabState::Done | RunnerTabState::Stopped => tab.iterations_used,
                 RunnerTabState::Error(_) => return,
             };
-            (tab.workflow_name.clone(), iteration)
+            (tab.label.clone(), iteration)
         };
 
         let plan_dir = self.store.workflow_dir(&name);
