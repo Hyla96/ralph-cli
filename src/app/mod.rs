@@ -1601,9 +1601,9 @@ impl App {
                         *error = None;
                     }
                 }
-                KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' => {
+                KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' || c == ' ' => {
                     if let Some(Dialog::NewSpec { input, error }) = &mut self.dialog {
-                        input.push(c);
+                        input.push(if c == ' ' { '-' } else { c });
                         *error = None;
                     }
                 }
