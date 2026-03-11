@@ -94,6 +94,11 @@ pub struct RunnerTab {
     /// Instant at which `panel_pulse_bright` was last toggled.
     /// Used to compute when the next toggle should occur (~500 ms interval).
     pub last_pulse_toggle: Instant,
+    /// Cached workflow data for WorkflowRunner tabs.
+    /// Loaded from disk when the tab is created and refreshed whenever
+    /// the file watcher fires (via `reload_all`).
+    /// Always `None` for SpecOp tabs.
+    pub workflow: Option<Workflow>,
 }
 
 pub enum Dialog {
@@ -2643,6 +2648,16 @@ impl App {
         // Reload the currently selected workflow from disk.
         self.load_current_workflow();
 
+        // Refresh cached workflow data for all WorkflowRunner runner tabs so the
+        // progress panel reflects the latest task statuses from disk.
+        for tab_idx in 0..self.runner_tabs.len() {
+            if self.runner_tabs[tab_idx].tab_kind == TabKind::WorkflowRunner {
+                let label = self.runner_tabs[tab_idx].label.clone();
+                let dir = self.store.workflow_dir(&label);
+                self.runner_tabs[tab_idx].workflow = Workflow::load(&dir).ok();
+            }
+        }
+
         // Clear a stale ContinuePrompt if the referenced task no longer needs to run.
         if let Some(Dialog::ContinuePrompt { next_id, .. }) = &self.dialog {
             let next_id_clone = next_id.clone();
@@ -3180,17 +3195,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to populate current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to populate current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3226,6 +3236,7 @@ impl App {
             tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
+            tab.workflow = loaded_workflow;
             self.active_tab = reuse + 2; // active_tab is 2-indexed for runner tabs (0=Specs, 1=Workflows)
         } else {
             let tab = RunnerTab {
@@ -3251,6 +3262,7 @@ impl App {
                 show_workflow_panel: true,
                 panel_pulse_bright: true,
                 last_pulse_toggle: Instant::now(),
+                workflow: loaded_workflow,
             };
             self.runner_tabs.push(tab);
             self.active_tab = 1 + self.runner_tabs.len(); // runner tabs are 2-indexed in active_tab (0=Specs, 1=Workflows)
@@ -3338,6 +3350,7 @@ impl App {
             show_workflow_panel: false,
             panel_pulse_bright: true,
             last_pulse_toggle: Instant::now(),
+            workflow: None,
         };
 
         self.runner_tabs.push(tab);
@@ -3375,17 +3388,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to populate current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to populate current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3413,6 +3421,7 @@ impl App {
             tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
+            tab.workflow = loaded_workflow;
         }
 
         self.resize_txs.push(resize_tx);
@@ -3450,17 +3459,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to update current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to update current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let new_iteration = iteration + 1;
 
@@ -3486,6 +3490,7 @@ impl App {
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = new_iteration;
+            tab.workflow = loaded_workflow;
         }
 
         self.resize_txs.push(resize_tx);
