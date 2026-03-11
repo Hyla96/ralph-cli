@@ -25,6 +25,10 @@ const MAX_ITERATIONS: u32 = 10;
 // 1 tab bar + 1 task bar + 1 top border + 1 bottom border + 1 buttons bar.
 const PTY_ROW_OVERHEAD: u16 = 5;
 
+/// Width (in terminal columns) of the workflow progress panel rendered to the right of the PTY
+/// viewport when `RunnerTab::show_workflow_panel` is true.
+pub const WORKFLOW_PANEL_WIDTH: u16 = 35;
+
 /// Per-runner tab state.
 pub enum RunnerTabState {
     Running { iteration: u32 },
@@ -84,6 +88,21 @@ pub struct RunnerTab {
     /// Cleared at the start of each new iteration and consumed in the `done` block to
     /// determine whether the task should be treated as a success.
     pub saw_complete: bool,
+    /// When true, the workflow progress panel is shown on the right side of the PTY viewport.
+    /// Defaults to `true` for `WorkflowRunner` tabs, `false` for `SpecOp` tabs.
+    /// Toggled by pressing `w` in normal mode.
+    pub show_workflow_panel: bool,
+    /// Tracks the current phase of the running-task pulse animation.
+    /// Alternates between bright and dim yellow approximately every 500 ms.
+    pub panel_pulse_bright: bool,
+    /// Instant at which `panel_pulse_bright` was last toggled.
+    /// Used to compute when the next toggle should occur (~500 ms interval).
+    pub last_pulse_toggle: Instant,
+    /// Cached workflow data for WorkflowRunner tabs.
+    /// Loaded from disk when the tab is created and refreshed whenever
+    /// the file watcher fires (via `reload_all`).
+    /// Always `None` for SpecOp tabs.
+    pub workflow: Option<Workflow>,
 }
 
 pub enum Dialog {
@@ -210,6 +229,7 @@ async fn runner_task(
     size: (u16, u16),
     resize_rx: UnboundedReceiver<(u16, u16)>,
     skip_permissions: bool,
+    permission_mode: crate::ralph::config::PermissionMode,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -241,6 +261,9 @@ async fn runner_task(
     let mut cmd = CommandBuilder::new("claude");
     if skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
+    }
+    if let Some(mode) = permission_mode.as_cli_value() {
+        cmd.args(["--permission-mode", mode]);
     }
     cmd.args(["--agent", "ralph", "Implement the next task."]);
     cmd.cwd(&repo_root);
@@ -1079,9 +1102,33 @@ impl App {
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
                             self.config_screen = None;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if let Some(cs) = &mut self.config_screen {
+                                cs.selected_row = cs.selected_row.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if let Some(cs) = &mut self.config_screen {
+                                cs.selected_row = (cs.selected_row + 1).min(1);
+                            }
+                        }
                         KeyCode::Char(' ') | KeyCode::Enter => {
-                            self.config.dangerously_skip_permissions =
-                                !self.config.dangerously_skip_permissions;
+                            let row = self
+                                .config_screen
+                                .as_ref()
+                                .map(|cs| cs.selected_row)
+                                .unwrap_or(0);
+                            match row {
+                                0 => {
+                                    self.config.dangerously_skip_permissions =
+                                        !self.config.dangerously_skip_permissions;
+                                }
+                                1 => {
+                                    self.config.permission_mode =
+                                        self.config.permission_mode.cycle();
+                                }
+                                _ => {}
+                            }
                             let _ = self.store.save_config(&self.config);
                         }
                         _ => {}
@@ -1422,6 +1469,23 @@ impl App {
                                 };
                                 // Runner BackTab can never reach 0 (runner index >= 2),
                                 // so no load_specs_files call needed here.
+                            }
+                            // [w]orkflow panel: toggle the workflow progress panel.
+                            // Recreates the parser with an updated column count so the PTY
+                            // renders correctly at the new viewport width.
+                            KeyCode::Char('w') => {
+                                if let Some(tab) = self.runner_tabs.get_mut(tab_idx) {
+                                    tab.show_workflow_panel = !tab.show_workflow_panel;
+                                    let (cols, rows) = self.initial_size;
+                                    let pty_rows = rows.saturating_sub(PTY_ROW_OVERHEAD);
+                                    let pty_cols = if tab.show_workflow_panel {
+                                        cols.saturating_sub(WORKFLOW_PANEL_WIDTH)
+                                    } else {
+                                        cols
+                                    };
+                                    tab.parser = VtParser::new(pty_rows, pty_cols, 1000);
+                                    tab.log_scroll = 0;
+                                }
                             }
                             // Normal mode: unrecognized keys are ignored (use Insert mode to type freely).
                             _ => {}
@@ -2552,6 +2616,16 @@ impl App {
         {
             self.notification = None;
         }
+        // Pulse animation: toggle panel_pulse_bright every ~500 ms for running tabs.
+        const PULSE_INTERVAL: Duration = Duration::from_millis(500);
+        for tab in &mut self.runner_tabs {
+            if matches!(tab.state, RunnerTabState::Running { .. })
+                && tab.last_pulse_toggle.elapsed() >= PULSE_INTERVAL
+            {
+                tab.panel_pulse_bright = !tab.panel_pulse_bright;
+                tab.last_pulse_toggle = Instant::now();
+            }
+        }
     }
 
     /// Drains all pending watcher events into a local Vec (non-blocking try_recv loop).
@@ -2604,6 +2678,16 @@ impl App {
 
         // Reload the currently selected workflow from disk.
         self.load_current_workflow();
+
+        // Refresh cached workflow data for all WorkflowRunner runner tabs so the
+        // progress panel reflects the latest task statuses from disk.
+        for tab_idx in 0..self.runner_tabs.len() {
+            if self.runner_tabs[tab_idx].tab_kind == TabKind::WorkflowRunner {
+                let label = self.runner_tabs[tab_idx].label.clone();
+                let dir = self.store.workflow_dir(&label);
+                self.runner_tabs[tab_idx].workflow = Workflow::load(&dir).ok();
+            }
+        }
 
         // Clear a stale ContinuePrompt if the referenced task no longer needs to run.
         if let Some(Dialog::ContinuePrompt { next_id, .. }) = &self.dialog {
@@ -3142,17 +3226,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to populate current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to populate current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3188,6 +3267,7 @@ impl App {
             tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
+            tab.workflow = loaded_workflow;
             self.active_tab = reuse + 2; // active_tab is 2-indexed for runner tabs (0=Specs, 1=Workflows)
         } else {
             let tab = RunnerTab {
@@ -3210,6 +3290,10 @@ impl App {
                 current_task_cost_usd: 0.0,
                 insert_mode: false,
                 saw_complete: false,
+                show_workflow_panel: true,
+                panel_pulse_bright: true,
+                last_pulse_toggle: Instant::now(),
+                workflow: loaded_workflow,
             };
             self.runner_tabs.push(tab);
             self.active_tab = 1 + self.runner_tabs.len(); // runner tabs are 2-indexed in active_tab (0=Specs, 1=Workflows)
@@ -3225,6 +3309,7 @@ impl App {
             (cols, pty_rows),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 
@@ -3293,6 +3378,10 @@ impl App {
             current_task_cost_usd: 0.0,
             insert_mode: true,
             saw_complete: false,
+            show_workflow_panel: false,
+            panel_pulse_bright: true,
+            last_pulse_toggle: Instant::now(),
+            workflow: None,
         };
 
         self.runner_tabs.push(tab);
@@ -3330,17 +3419,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to populate current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to populate current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3368,6 +3452,7 @@ impl App {
             tab.current_task_cost_usd = 0.0;
             tab.insert_mode = false;
             tab.saw_complete = false;
+            tab.workflow = loaded_workflow;
         }
 
         self.resize_txs.push(resize_tx);
@@ -3380,6 +3465,7 @@ impl App {
             (cols, pty_rows),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 
@@ -3404,17 +3490,12 @@ impl App {
         let plan_dir = self.store.workflow_dir(&name);
         let repo_root = self.store.root().to_path_buf();
 
-        // Load workflow to update current task info before spawning.
-        let (current_task_id, current_task_title) = {
-            let workflow_dir = self.store.workflow_dir(&name);
-            match Workflow::load(&workflow_dir)
-                .ok()
-                .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
-            {
-                Some((id, title)) => (Some(id), Some(title)),
-                None => (None, None),
-            }
-        };
+        // Load workflow to update current task info and cache the full task list.
+        let loaded_workflow = Workflow::load(&plan_dir).ok();
+        let (current_task_id, current_task_title) = loaded_workflow
+            .as_ref()
+            .and_then(|w| w.next_task().map(|t| (t.id.clone(), t.title.clone())))
+            .map_or((None, None), |(id, title)| (Some(id), Some(title)));
 
         let new_iteration = iteration + 1;
 
@@ -3440,6 +3521,7 @@ impl App {
             tab.current_task_id = current_task_id;
             tab.current_task_title = current_task_title;
             tab.iterations_used = new_iteration;
+            tab.workflow = loaded_workflow;
         }
 
         self.resize_txs.push(resize_tx);
@@ -3453,6 +3535,7 @@ impl App {
             (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 }

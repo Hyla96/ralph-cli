@@ -20,7 +20,7 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 
 ## Workflow
 
-1. Read the root CLAUDE.md (this file), any CLAUDE.md files in directories you'll work in and README.md.
+1. Read the CLAUDE.md and the COMPONENT_ARCHITECTURE.md if present.
 2. Read `workflows.json` from `$RALPH_PLAN_DIR`
 3. Read `progress.txt` from `$RALPH_PLAN_DIR` — Codebase Patterns section first
 4. Pick the **highest priority** task where `passes: false`
@@ -31,9 +31,9 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 9. Update CLAUDE.md files in edited directories if you discovered reusable knowledge
 10. If needed update any relevant documentation in the project, like README.md and similar files.
 11. Commit all code changes: `feat: [description]`
-    r2. Append to `progress.txt` (see format below)
-12. Update `workflows.json`: set `passes: true` for the completed task
-13. Signal completion to the runner:
+12. Append to `progress.txt` (see format below)
+13. Update `workflows.json`: set `passes: true` for the completed task
+14. Signal completion to the runner:
     - Output <promise>RALPH_SENTINEL_COMPLETE</promise> then stop. Do not start the next task.
 
 ## Validation

@@ -1,6 +1,6 @@
 use crate::app::{
     App, ConfigScreen, Dialog, SpecEditorField, SpecEditorMode, SpecEditorState, SpecsFocus,
-    RunnerTab, RunnerTabState, TabKind, TaskDetailField,
+    RunnerTab, RunnerTabState, TabKind, TaskDetailField, WORKFLOW_PANEL_WIDTH,
 };
 use crate::ralph::RalphConfig;
 use crate::ralph::usage::UsageFile;
@@ -460,6 +460,8 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
 
     // PTY viewport (layout[1]): border title shows "Runner: {label}" for WorkflowRunner tabs
     // and just the label for SpecOp tabs.
+    // When show_workflow_panel is true, the area splits horizontally: PTY on the left
+    // (flexible) and workflow progress panel on the right (WORKFLOW_PANEL_WIDTH cols).
     // The vt100 scrollback position (set_scrollback) is updated by key handlers so that
     // PseudoTerminal renders the correct view without needing a mutable App reference.
     let log_title_text = if tab.tab_kind == TabKind::SpecOp {
@@ -471,7 +473,18 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
         log_title_text,
         Style::default().fg(CLAUDE_ORANGE),
     ));
-    {
+    if tab.show_workflow_panel {
+        let pty_split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(WORKFLOW_PANEL_WIDTH)])
+            .split(layout[1]);
+        {
+            use tui_term::widget::PseudoTerminal;
+            let pseudo_term = PseudoTerminal::new(tab.parser.screen()).block(log_block);
+            frame.render_widget(pseudo_term, pty_split[0]);
+        }
+        draw_workflow_panel(frame, tab, pty_split[1]);
+    } else {
         use tui_term::widget::PseudoTerminal;
         let pseudo_term = PseudoTerminal::new(tab.parser.screen()).block(log_block);
         frame.render_widget(pseudo_term, layout[1]);
@@ -491,6 +504,11 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Red),
         ))
     } else {
+        let wf_label = if tab.show_workflow_panel {
+            "[w]orkflow:hide"
+        } else {
+            "[w]orkflow:show"
+        };
         match &tab.state {
             RunnerTabState::Running { .. } => {
                 let auto_label = if tab.auto_continue {
@@ -500,7 +518,7 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 // [c]continue is never shown in Running state regardless of auto mode.
                 Line::from(Span::raw(format!(
-                    "[i]nsert  [s]stop  {auto_label}  [?]help  [q]uit"
+                    "[i]nsert  [s]stop  {auto_label}  {wf_label}  [?]help  [q]uit"
                 )))
             }
             RunnerTabState::Done => {
@@ -511,22 +529,96 @@ fn draw_runner_tab(frame: &mut Frame, app: &App, area: Rect) {
                     && !tab.auto_continue
                     && !workflow_complete;
                 if show_continue {
-                    Line::from(vec![
-                        Span::raw("[c]continue  "),
-                        Span::raw("[x]close  [?]help"),
-                    ])
+                    Line::from(Span::raw(format!(
+                        "[c]continue  [x]close  {wf_label}  [?]help"
+                    )))
                 } else {
-                    Line::from(Span::raw("[x]close  [?]help"))
+                    Line::from(Span::raw(format!("[x]close  {wf_label}  [?]help")))
                 }
             }
-            RunnerTabState::Stopped => Line::from(Span::raw("[x]close  [r]estart  [?]help")),
+            RunnerTabState::Stopped => {
+                Line::from(Span::raw(format!("[x]close  [r]estart  {wf_label}  [?]help")))
+            }
             RunnerTabState::Error(_) => Line::from(Span::styled(
-                "[x]close  [q]quit  [?]help",
+                format!("[x]close  {wf_label}  [q]quit  [?]help"),
                 Style::default().fg(Color::Red),
             )),
         }
     };
     frame.render_widget(Paragraph::new(buttons_line), layout[2]);
+}
+
+/// Renders the workflow progress panel that shows all tasks and their pass/fail status.
+///
+/// Renders a bordered "Workflow" box listing each task as:
+///   `{dot} {task_id}: {title}` (title truncated to fit the inner width)
+/// Tasks are shown in the order they appear in the workflow file (priority order).
+///
+/// Status styling:
+/// - Completed (`passes: true`): green `●` dot, green text
+/// - Running (matches `current_task_id`): yellow `●` dot, default text
+/// - Pending: default `○` dot, default text
+///
+/// If no workflow data is available, renders the empty bordered box.
+fn draw_workflow_panel(frame: &mut Frame, tab: &RunnerTab, area: Rect) {
+    let panel_block = Block::default().borders(Borders::ALL).title("Workflow");
+
+    let Some(workflow) = &tab.workflow else {
+        frame.render_widget(panel_block, area);
+        return;
+    };
+
+    // Inner width: outer area minus left and right borders.
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let items: Vec<ListItem> = workflow
+        .data
+        .tasks
+        .iter()
+        .map(|task| {
+            let is_current =
+                tab.current_task_id.as_deref() == Some(task.id.as_str());
+            let is_running = matches!(tab.state, RunnerTabState::Running { .. });
+
+            let (dot, dot_style, text_style) = if task.passes {
+                // Completed: green ● dot, green text.
+                (
+                    "\u{25cf}", // ●
+                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Green),
+                )
+            } else if is_current && is_running {
+                // Currently running: pulsing yellow ● dot (bright/dim alternates every ~500 ms).
+                let yellow = if tab.panel_pulse_bright {
+                    Color::Yellow
+                } else {
+                    Color::Rgb(160, 130, 0)
+                };
+                (
+                    "\u{25cf}", // ●
+                    Style::default().fg(yellow),
+                    Style::default(),
+                )
+            } else {
+                // Pending (or current task when runner is stopped/done): ○ dot, default text.
+                ("\u{25cb}", Style::default(), Style::default()) // ○
+            };
+
+            let id_label = format!("{}: ", task.id);
+            // dot (1 char) + space (1 char) + id_label chars
+            let prefix_chars = 2 + id_label.chars().count();
+            let title_max = inner_width.saturating_sub(prefix_chars);
+            let title: String = task.title.chars().take(title_max).collect();
+
+            ListItem::new(Line::from(vec![
+                Span::styled(dot, dot_style),
+                Span::styled(format!(" {id_label}{title}"), text_style),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items).block(panel_block);
+    frame.render_widget(list, area);
 }
 
 // Claude brand orange (#DA7756).
@@ -905,8 +997,8 @@ fn draw_help_dialog(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_runner_help_dialog(frame: &mut Frame, area: Rect) {
-    // 52 wide (2 border + 50 content), 19 tall (2 border + 17 content rows)
-    let dialog_rect = centered_rect(52, 19, area);
+    // 52 wide (2 border + 50 content), 20 tall (2 border + 18 content rows)
+    let dialog_rect = centered_rect(52, 20, area);
     frame.render_widget(Clear, dialog_rect);
 
     let header_style = Style::default().add_modifier(Modifier::BOLD);
@@ -921,6 +1013,7 @@ fn draw_runner_help_dialog(frame: &mut Frame, area: Rect) {
         Line::from("  Tab         next tab"),
         Line::from("  Shift+Tab   prev tab"),
         Line::from("  t+1..9      switch tab by number"),
+        Line::from("  w           toggle workflow panel"),
         Line::from("  x           close tab"),
         Line::from("  ?           this help"),
         Line::from("  q           quit"),
@@ -1296,27 +1389,43 @@ fn draw_config_screen(
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner_area);
 
-    // Build setting rows. Currently there is one row.
-    let label = "Pass --dangerously-skip-permissions to claude";
-    let on = config.dangerously_skip_permissions;
-    let toggle_span = if on {
+    // Row 0: --dangerously-skip-permissions toggle
+    let skip_label = "Pass --dangerously-skip-permissions to claude";
+    let skip_toggle = if config.dangerously_skip_permissions {
         Span::styled("[ ON ]", Style::default().fg(Color::Green))
     } else {
         Span::styled("[OFF]", Style::default().fg(Color::DarkGray))
     };
-
-    let row_style = if config_screen.selected_row == 0 {
+    let skip_style = if config_screen.selected_row == 0 {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
     };
-
-    let row_line = Line::from(vec![
-        Span::styled(format!("  {label:<50}"), row_style),
-        toggle_span,
+    let skip_line = Line::from(vec![
+        Span::styled(format!("  {skip_label:<50}"), skip_style),
+        skip_toggle,
     ]);
 
-    frame.render_widget(Paragraph::new(vec![row_line]), layout[0]);
+    // Row 1: --permission-mode cycle
+    let mode_label = "Permission mode (--permission-mode)";
+    let mode_value = config.permission_mode.label();
+    let mode_color = match config.permission_mode {
+        crate::ralph::config::PermissionMode::Default => Color::DarkGray,
+        crate::ralph::config::PermissionMode::AcceptEdits => Color::Yellow,
+        crate::ralph::config::PermissionMode::DontAsk => Color::Green,
+    };
+    let mode_toggle = Span::styled(format!("[{mode_value}]"), Style::default().fg(mode_color));
+    let mode_style = if config_screen.selected_row == 1 {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let mode_line = Line::from(vec![
+        Span::styled(format!("  {mode_label:<50}"), mode_style),
+        mode_toggle,
+    ]);
+
+    frame.render_widget(Paragraph::new(vec![skip_line, mode_line]), layout[0]);
 
     // Hint line
     let hint = Line::from("[Esc] Back  [↑↓] Navigate  [Space] Toggle");
