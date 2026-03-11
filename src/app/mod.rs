@@ -2616,6 +2616,16 @@ impl App {
         {
             self.notification = None;
         }
+        // Pulse animation: toggle panel_pulse_bright every ~500 ms for running tabs.
+        const PULSE_INTERVAL: Duration = Duration::from_millis(500);
+        for tab in &mut self.runner_tabs {
+            if matches!(tab.state, RunnerTabState::Running { .. })
+                && tab.last_pulse_toggle.elapsed() >= PULSE_INTERVAL
+            {
+                tab.panel_pulse_bright = !tab.panel_pulse_bright;
+                tab.last_pulse_toggle = Instant::now();
+            }
+        }
     }
 
     /// Drains all pending watcher events into a local Vec (non-blocking try_recv loop).

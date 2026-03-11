@@ -572,6 +572,7 @@ fn draw_workflow_panel(frame: &mut Frame, tab: &RunnerTab, area: Rect) {
         .map(|task| {
             let is_current =
                 tab.current_task_id.as_deref() == Some(task.id.as_str());
+            let is_running = matches!(tab.state, RunnerTabState::Running { .. });
 
             let (dot, dot_style, text_style) = if task.passes {
                 // Completed: green ● dot, green text.
@@ -580,15 +581,20 @@ fn draw_workflow_panel(frame: &mut Frame, tab: &RunnerTab, area: Rect) {
                     Style::default().fg(Color::Green),
                     Style::default().fg(Color::Green),
                 )
-            } else if is_current {
-                // Currently running: yellow ● dot, default text.
+            } else if is_current && is_running {
+                // Currently running: pulsing yellow ● dot (bright/dim alternates every ~500 ms).
+                let yellow = if tab.panel_pulse_bright {
+                    Color::Yellow
+                } else {
+                    Color::Rgb(160, 130, 0)
+                };
                 (
                     "\u{25cf}", // ●
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(yellow),
                     Style::default(),
                 )
             } else {
-                // Pending: default ○ dot, default text.
+                // Pending (or current task when runner is stopped/done): ○ dot, default text.
                 ("\u{25cb}", Style::default(), Style::default()) // ○
             };
 
