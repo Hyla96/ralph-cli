@@ -1296,27 +1296,43 @@ fn draw_config_screen(
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner_area);
 
-    // Build setting rows. Currently there is one row.
-    let label = "Pass --dangerously-skip-permissions to claude";
-    let on = config.dangerously_skip_permissions;
-    let toggle_span = if on {
+    // Row 0: --dangerously-skip-permissions toggle
+    let skip_label = "Pass --dangerously-skip-permissions to claude";
+    let skip_toggle = if config.dangerously_skip_permissions {
         Span::styled("[ ON ]", Style::default().fg(Color::Green))
     } else {
         Span::styled("[OFF]", Style::default().fg(Color::DarkGray))
     };
-
-    let row_style = if config_screen.selected_row == 0 {
+    let skip_style = if config_screen.selected_row == 0 {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
     };
-
-    let row_line = Line::from(vec![
-        Span::styled(format!("  {label:<50}"), row_style),
-        toggle_span,
+    let skip_line = Line::from(vec![
+        Span::styled(format!("  {skip_label:<50}"), skip_style),
+        skip_toggle,
     ]);
 
-    frame.render_widget(Paragraph::new(vec![row_line]), layout[0]);
+    // Row 1: --permission-mode cycle
+    let mode_label = "Permission mode (--permission-mode)";
+    let mode_value = config.permission_mode.label();
+    let mode_color = match config.permission_mode {
+        crate::ralph::config::PermissionMode::Default => Color::DarkGray,
+        crate::ralph::config::PermissionMode::AcceptEdits => Color::Yellow,
+        crate::ralph::config::PermissionMode::DontAsk => Color::Green,
+    };
+    let mode_toggle = Span::styled(format!("[{mode_value}]"), Style::default().fg(mode_color));
+    let mode_style = if config_screen.selected_row == 1 {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let mode_line = Line::from(vec![
+        Span::styled(format!("  {mode_label:<50}"), mode_style),
+        mode_toggle,
+    ]);
+
+    frame.render_widget(Paragraph::new(vec![skip_line, mode_line]), layout[0]);
 
     // Hint line
     let hint = Line::from("[Esc] Back  [↑↓] Navigate  [Space] Toggle");

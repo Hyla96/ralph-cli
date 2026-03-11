@@ -15,7 +15,6 @@ You are an autonomous research agent. Your job is to read a draft spec, research
 ## Time Budget
 
 Default time budget: **2 minutes**.
-
 Before starting research, confirm with the user:
 
 ```
@@ -46,6 +45,7 @@ Stay within the confirmed budget. Prioritize high-value research items if time i
 Read `$SPEC_FILE`. If the variable is not set or the file does not exist, stop immediately with an error message.
 
 Extract:
+
 - The feature name (from the filename or title)
 - The `## Research Needed` checklist items
 - The `## Research Findings` section (to know where to write)
@@ -58,22 +58,26 @@ Extract:
 For each relevant item in `## Research Needed`, perform targeted research:
 
 ### Best Practices
+
 - Search for established patterns and conventions for the problem domain
 - Look for authoritative sources (official docs, well-known engineering blogs)
 - Focus on practical, actionable guidance -- not theoretical overviews
 
 ### Library/Dependency Analysis
+
 - Search for libraries or tools that could help implement the feature
 - Compare alternatives: maturity, maintenance status, compatibility
 - Check for known issues or breaking changes in recent versions
 - Note version requirements and license compatibility
 
 ### Competitive Analysis
+
 - Search for how similar tools or products handle the same feature
 - Document specific UX patterns, workflows, or technical approaches
 - Note what works well and what common complaints exist
 
 ### Research Quality Rules
+
 - Cite sources with URLs when possible
 - Prefer recent information (last 12 months)
 - Flag uncertain or conflicting findings explicitly
@@ -149,6 +153,7 @@ Include questions that surfaced during research where the answer affects impleme
 Write a standalone copy of all research findings to `.ralph/specs/research-cache-<feature>.md` where `<feature>` matches the feature name from the spec filename (e.g., if spec is `spec-task-priority.md`, cache is `research-cache-task-priority.md`).
 
 This file should contain:
+
 - All research findings (same content as written into the spec)
 - Suggested refinements
 - Open questions from research

@@ -84,6 +84,16 @@ pub struct RunnerTab {
     /// Cleared at the start of each new iteration and consumed in the `done` block to
     /// determine whether the task should be treated as a success.
     pub saw_complete: bool,
+    /// When true, the workflow progress panel is shown on the right side of the PTY viewport.
+    /// Defaults to `true` for `WorkflowRunner` tabs, `false` for `SpecOp` tabs.
+    /// Toggled by pressing `w` in normal mode.
+    pub show_workflow_panel: bool,
+    /// Tracks the current phase of the running-task pulse animation.
+    /// Alternates between bright and dim yellow approximately every 500 ms.
+    pub panel_pulse_bright: bool,
+    /// Instant at which `panel_pulse_bright` was last toggled.
+    /// Used to compute when the next toggle should occur (~500 ms interval).
+    pub last_pulse_toggle: Instant,
 }
 
 pub enum Dialog {
@@ -210,6 +220,7 @@ async fn runner_task(
     size: (u16, u16),
     resize_rx: UnboundedReceiver<(u16, u16)>,
     skip_permissions: bool,
+    permission_mode: crate::ralph::config::PermissionMode,
 ) {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -241,6 +252,9 @@ async fn runner_task(
     let mut cmd = CommandBuilder::new("claude");
     if skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
+    }
+    if let Some(mode) = permission_mode.as_cli_value() {
+        cmd.args(["--permission-mode", mode]);
     }
     cmd.args(["--agent", "ralph", "Implement the next task."]);
     cmd.cwd(&repo_root);
@@ -1079,9 +1093,33 @@ impl App {
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
                             self.config_screen = None;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if let Some(cs) = &mut self.config_screen {
+                                cs.selected_row = cs.selected_row.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if let Some(cs) = &mut self.config_screen {
+                                cs.selected_row = (cs.selected_row + 1).min(1);
+                            }
+                        }
                         KeyCode::Char(' ') | KeyCode::Enter => {
-                            self.config.dangerously_skip_permissions =
-                                !self.config.dangerously_skip_permissions;
+                            let row = self
+                                .config_screen
+                                .as_ref()
+                                .map(|cs| cs.selected_row)
+                                .unwrap_or(0);
+                            match row {
+                                0 => {
+                                    self.config.dangerously_skip_permissions =
+                                        !self.config.dangerously_skip_permissions;
+                                }
+                                1 => {
+                                    self.config.permission_mode =
+                                        self.config.permission_mode.cycle();
+                                }
+                                _ => {}
+                            }
                             let _ = self.store.save_config(&self.config);
                         }
                         _ => {}
@@ -3210,6 +3248,9 @@ impl App {
                 current_task_cost_usd: 0.0,
                 insert_mode: false,
                 saw_complete: false,
+                show_workflow_panel: true,
+                panel_pulse_bright: true,
+                last_pulse_toggle: Instant::now(),
             };
             self.runner_tabs.push(tab);
             self.active_tab = 1 + self.runner_tabs.len(); // runner tabs are 2-indexed in active_tab (0=Specs, 1=Workflows)
@@ -3225,6 +3266,7 @@ impl App {
             (cols, pty_rows),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 
@@ -3293,6 +3335,9 @@ impl App {
             current_task_cost_usd: 0.0,
             insert_mode: true,
             saw_complete: false,
+            show_workflow_panel: false,
+            panel_pulse_bright: true,
+            last_pulse_toggle: Instant::now(),
         };
 
         self.runner_tabs.push(tab);
@@ -3380,6 +3425,7 @@ impl App {
             (cols, pty_rows),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 
@@ -3453,6 +3499,7 @@ impl App {
             (cols, rows.saturating_sub(PTY_ROW_OVERHEAD)),
             resize_rx,
             self.config.dangerously_skip_permissions,
+            self.config.permission_mode,
         )));
     }
 }
