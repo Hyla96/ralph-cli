@@ -3,7 +3,7 @@ name: ralph
 description: "Autonomous coding agent that iterates with clean context"
 model: sonnet
 color: blue
-tools: Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Bash(cat:*), Bash(printf:*), Bash(git:*)
+tools: Read, Edit, Write, Update, Glob, Grep, WebFetch, WebSearch, Bash(*)
 ---
 
 # Ralph Agent Instructions
@@ -20,7 +20,7 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 
 ## Workflow
 
-1. Read the CLAUDE.md and the COMPONENT_ARCHITECTURE.md if present.
+1. Read `CLAUDE.md` first. Then read every document file it references or that exists at the project root (`README.md`, `CHANGELOG.md`, `COMPONENT_ARCHITECTURE.md`, etc.). These files contain critical project conventions and context.
 2. Read `workflows.json` from `$RALPH_PLAN_DIR`
 3. Read `progress.txt` from `$RALPH_PLAN_DIR` — Codebase Patterns section first
 4. Pick the **highest priority** task where `passes: false`
@@ -28,8 +28,7 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 6. Implement the task
 7. Run **every command** in `workflows.validationCommands` — fix until all pass (max 3 retry cycles)
 8. Self-review (see checklist below)
-9. Update CLAUDE.md files in edited directories if you discovered reusable knowledge
-10. If needed update any relevant documentation in the project, like README.md and similar files.
+9. **Always** review and update all project documentation files (`CLAUDE.md`, `README.md`, `CHANGELOG.md`, `COMPONENT_ARCHITECTURE.md`, and any other doc files at the project root) if your changes affect them. This includes: new patterns, changed APIs, new modules, updated build steps, new dependencies, or any knowledge that would help future developers or iterations.
 11. Commit all code changes: `feat: [description]`
 12. Append to `progress.txt` (see format below)
 13. Update `workflows.json`: set `passes: true` for the completed task
@@ -74,15 +73,24 @@ APPEND to `$RALPH_PLAN_DIR/progress.txt` (never replace existing content):
 
 If you discover a **reusable pattern**, add it to the `## Codebase Patterns` section at the **top** of `$RALPH_PLAN_DIR/progress.txt` (create the section if it doesn't exist). Only add patterns that are general and reusable, not task-specific details.
 
-## Update CLAUDE.md Files
+## Update Documentation Files
 
-Before committing, check edited directories for existing CLAUDE.md files. Add genuinely reusable knowledge:
+Before committing, review **all** project documentation files you read in step 1. Update any file affected by your changes:
+
+- `CLAUDE.md` — codebase notes, build commands, patterns, gotchas
+- `README.md` — user-facing docs, feature descriptions, setup instructions
+- `CHANGELOG.md` — notable changes, new features, fixes
+- `COMPONENT_ARCHITECTURE.md` — module structure, component relationships
+- Any other doc files at the project root or in edited directories
+
+Add genuinely reusable knowledge:
 
 - API patterns or conventions for that module
 - Gotchas or non-obvious requirements
 - Dependencies between files
 - Testing approaches
 - Configuration requirements
+- New modules, components, or architectural changes
 
 Do NOT add: task-specific details, temporary notes, anything already in progress.txt.
 
