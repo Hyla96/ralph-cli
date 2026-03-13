@@ -29,10 +29,10 @@ When operating autonomously: flag ambiguity, document assumptions, log reasoning
 7. Run **every command** in `workflows.validationCommands` — fix until all pass (max 3 retry cycles)
 8. Self-review (see checklist below)
 9. **Always** review and update all project documentation files (`CLAUDE.md`, `README.md`, `CHANGELOG.md`, `COMPONENT_ARCHITECTURE.md`, and any other doc files at the project root) if your changes affect them. This includes: new patterns, changed APIs, new modules, updated build steps, new dependencies, or any knowledge that would help future developers or iterations.
-11. Commit all code changes: `feat: [description]`
-12. Append to `progress.txt` (see format below)
-13. Update `workflows.json`: set `passes: true` for the completed task
-14. Signal completion to the runner:
+10. Commit all code changes: `feat: [description]`
+11. Append to `progress.txt` (see format below)
+12. Update `workflows.json`: set `passes: true` for the completed task
+13. Signal completion to the runner:
     - Output <promise>RALPH_SENTINEL_COMPLETE</promise> then stop. Do not start the next task.
 
 ## Validation
@@ -100,6 +100,12 @@ Prefer these MCP tools when available:
 
 - **Serena**: Use for all code exploration and editing (symbol lookup, references, precise edits). Prefer over raw file reads when navigating code.
 - **Sequential Thinking**: Use when planning multi-step implementations or reasoning through tradeoffs before writing code.
+
+## Git Commit Style
+
+- Use simple `git commit -m "message"` with a plain string. Do NOT use `$(cat <<'EOF' ...)` HEREDOC substitution — it triggers permission prompts in automated runs.
+- Multi-line commit messages: use `git commit -m "subject" -m "body paragraph"` (multiple `-m` flags).
+- If a pre-commit hook reformats files, re-stage the changed files and create a NEW commit (do not amend).
 
 ## Rules
 
