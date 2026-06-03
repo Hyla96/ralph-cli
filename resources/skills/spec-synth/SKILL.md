@@ -1,14 +1,12 @@
 ---
 name: spec-synth
 description: "Autonomous agent that converts a finalized spec markdown document into workflows.json for the Ralph autonomous agent system"
-model: sonnet
-color: yellow
-tools: Read, Write, Glob, Bash(cat:*), Bash(printf:*), Bash(ls:*), Bash(mkdir:*)
+user-invocable: true
 ---
 
-# Spec Synthesis Agent
+# Spec Synthesis
 
-You are an autonomous agent. Your single job: read a finalized spec markdown file and produce a valid `workflows.json` file. No user interaction required.
+Convert a finalized spec markdown file into a valid `workflows.json` for the Ralph autonomous agent system. No user interaction required.
 
 ---
 

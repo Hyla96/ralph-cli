@@ -29,7 +29,7 @@ Specs live inside the repository under `.ralph/specs/`:
         └── spec-source.md      # draft → enriched → finalized spec
 ```
 
-The `/spec` skill creates this file. The `spec-researcher` agent enriches it. The `/spec-clarify` skill finalizes it. The `spec-synth` agent reads the finalized spec and writes `workflows.json`.
+The `/spec` skill creates this file. The `spec-researcher` agent enriches it. The `/spec-clarify` skill finalizes it. The `spec-synth` skill reads the finalized spec and writes `workflows.json`.
 
 ---
 
@@ -81,7 +81,7 @@ Workflows live inside the repository under `.ralph/workflows/`:
 | `r`            | Run selected workflow (opens a new runner tab) |
 | `s`            | Stop the runner for the selected workflow      |
 | `n`            | Open "New workflow" dialog                     |
-| `e`            | Edit `workflows.json` in `$EDITOR`                   |
+| `e`            | Edit `workflows.json` in `$EDITOR`             |
 | `d`            | Delete selected workflow (with confirmation)   |
 | `?`            | Open help overlay                              |
 | `t` + chord    | Navigate tabs (see below)                      |
@@ -110,7 +110,6 @@ Press `t`, then:
 | `1`–`9`   | Jump to tab by number (1 = Workflows tab) |
 | `←` / `→` | Cycle through tabs with wrapping          |
 
-
 ---
 
 ## Getting Started
@@ -120,10 +119,13 @@ ralph-tui is a Rust TUI that manages the Ralph agent loop. Ralph is a Claude Cod
 ### Step 1 — Prerequisites
 
 - **Rust** (edition 2024, toolchain ≥ 1.86). Install via [rustup](https://rustup.rs/):
+
   ```sh
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
+
 - **[`just`](https://github.com/casey/just)** task runner:
+
   ```sh
   cargo install just
   # or on macOS:
@@ -151,13 +153,13 @@ just set-resources
 
 This copies the following into `~/.claude/`, making them available to Claude Code:
 
-| Resource | Type | Invoked as |
-| --- | --- | --- |
-| `spec` | Skill (user-invocable) | `/spec` inside a Claude session |
-| `spec-clarify` | Skill (user-invocable) | `/spec-clarify` inside a Claude session |
-| `spec-researcher` | Agent | `claude --agent spec-researcher` from the terminal |
-| `spec-synth` | Agent | `claude --agent spec-synth` from the terminal |
-| `ralph` | Agent | `claude --agent ralph` (launched by ralph-tui automatically) |
+| Resource          | Type                   | Invoked as                                                   |
+| ----------------- | ---------------------- | ------------------------------------------------------------ |
+| `spec`            | Skill (user-invocable) | `/spec` inside a Claude session                              |
+| `spec-clarify`    | Skill (user-invocable) | `/spec-clarify` inside a Claude session                      |
+| `spec-researcher` | Agent                  | `claude --agent spec-researcher` from the terminal           |
+| `spec-synth`      | Skill (user-invocable) | `/spec-synth` inside a Claude session                        |
+| `ralph`           | Agent                  | `claude --agent ralph` (launched by ralph-tui automatically) |
 
 ### Step 4 — Install the binary
 
@@ -221,12 +223,12 @@ Claude presents research summaries and asks you to resolve each open question an
 
 Exit the Claude Code session when done.
 
-### Step 9 — Synthesize `workflows.json` with `spec-synth`
+### Step 9 — Synthesize `workflows.json` with `/spec-synth`
 
-Run the `spec-synth` agent from the terminal. It reads the finalized spec and emits `.ralph/workflows/<counter>-<feature>/workflows.json` with the structured task list:
+Run the `spec-synth` skill from a Claude session. It reads the finalized spec and emits `.ralph/workflows/<counter>-<feature>/workflows.json` with the structured task list:
 
 ```sh
-SPEC_FILE=.ralph/specs/<feature>/spec-source.md claude --agent spec-synth
+/spec-synth
 ```
 
 ### Step 10 — Exit Claude and launch ralph-tui
